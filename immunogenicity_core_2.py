@@ -816,9 +816,10 @@ def load_idc_comparables(idc_path: str, species: str = None,
 def _get_fallback_comparables(species: str = None, modality: str = None) -> List[Dict[str, Any]]:
     """Fallback comparable therapeutics when IDC DB isn't available."""
     return [
-        {"name": "Adalimumab (Humira)", "median_ada_freq": 39.0, "min_ada_freq": 5.0,
-         "max_ada_freq": 93.0, "n_datapoints": 48, "species": "Human",
-         "modality": "mAb", "target": "TNF-alpha"},
+        {"name": "Adalimumab (Humira)", "median_ada_freq": 5.0, "min_ada_freq": 1.0,
+         "max_ada_freq": 13.0, "n_datapoints": 159, "species": "Human",
+         "modality": "mAb", "target": "TNF-alpha", 
+         "note": "FDA label: 5% (ELISA), 1% with MTX, 12% monotherapy"},
         {"name": "Bococizumab", "median_ada_freq": 44.0, "min_ada_freq": 15.0,
          "max_ada_freq": 48.0, "n_datapoints": 6, "species": "Humanized",
          "modality": "mAb", "target": "PCSK9"},
