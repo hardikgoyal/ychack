@@ -130,6 +130,8 @@ from sequence_engine import (
     filter_surface_epitopes, detect_cdr_regions, check_cdr_epitope_overlap,
 )
 from claude_report import generate_risk_memo
+from safebind_mhc1_cytotoxic import run_cytotoxic_assessment, CytotoxicReport
+from safebind_composite_scorer import compute_composite_score, CompositeScore
 from deimmunize import (
     deimmunize_epitopes, generate_redesigned_sequences,
     run_tolerance_analysis,
@@ -299,6 +301,7 @@ chain_cdr = {}          # {chain_name: [cdr_dict]}
 chain_sasa = {}         # {chain_name: {residue: sasa}}
 chain_diffs = {}        # {chain_name: [(pos, q, r)]}
 chain_pdb = {}          # {chain_name: pdb_string} — populated in Tab 2 if Tamarind key present
+chain_mhc1 = {}         # {chain_name: CytotoxicReport}
 
 # Run alignment + B-cell prediction per chain (before tabs so all tabs can use results)
 for i, (chain_name, seq) in enumerate(chains.items()):
@@ -350,10 +353,12 @@ for chain_name, results in chain_alignments.items():
 # ==============================
 st.markdown("## SafeBind Risk Assessment")
 
-tab1, tab2, tab_bcell, tab3 = st.tabs([
+tab1, tab2, tab_bcell, tab_mhc1, tab_composite, tab3 = st.tabs([
     "Prediction",
     "Structure",
     "B-cell Epitopes",
+    "Cytotoxic (MHC-I)",
+    "Composite Score",
     "Redesign",
 ])
 
@@ -369,16 +374,6 @@ with tab1:
             </div>""",
             unsafe_allow_html=True,
         )
-        if risk_result.nada:
-            nada = risk_result.nada
-            st.markdown(
-                f"""<div style="text-align:center; padding:0.8rem; background:{nada.severity_color}12;
-                border-radius:8px; margin-top:0.5rem; border:1px solid {nada.severity_color}30">
-                <div style="color:{nada.severity_color}; font-size:1.4rem; font-weight:600">{nada.nada_pct}%</div>
-                <div style="font-size:0.8rem; color:#888">Neutralizing ADA</div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
 
     with col_breakdown:
         components = ["Clinical Lookup", "Sequence Similarity", "Feature Adjustment"]
@@ -866,6 +861,278 @@ with tab_bcell:
                         )
                 else:
                     st.info("No B-cell epitopes predicted.")
+
+# ==============================
+# PART 2C — Cytotoxic (MHC-I) Analysis
+# ==============================
+with tab_mhc1:
+    if not chains:
+        st.info("Paste a protein sequence in the sidebar to enable MHC-I cytotoxic analysis.")
+    else:
+        st.markdown("**MHC Class I / CD8+ Cytotoxic T-cell Assessment**")
+        st.caption(
+            "Dual-pathway analysis: MHC-I presents intracellular peptides (8-11mers) to CD8+ cytotoxic T cells. "
+            "Unlike MHC-II/ADA (humoral), this pathway causes direct cell killing — critical for gene therapy and cell therapy."
+        )
+
+        # Run MHC-I analysis per chain
+        for chain_name, chain_seq in chains.items():
+            mhc1_key = f"mhc1_{chain_name}"
+            if mhc1_key not in st.session_state:
+                with st.spinner(f"Running MHC-I prediction for {chain_name}..."):
+                    mhc1_report = run_cytotoxic_assessment(
+                        chain_seq, name=chain_name, use_mhcflurry=False, use_iedb=True,
+                    )
+                    st.session_state[mhc1_key] = mhc1_report
+            chain_mhc1[chain_name] = st.session_state[mhc1_key]
+
+        # Summary metrics across chains
+        total_strong = sum(r.strong_binders for r in chain_mhc1.values())
+        total_moderate = sum(r.moderate_binders for r in chain_mhc1.values())
+        total_validated = sum(r.validated_hits for r in chain_mhc1.values())
+        avg_risk = sum(r.overall_cytotoxic_risk for r in chain_mhc1.values()) / max(len(chain_mhc1), 1)
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        risk_color = "#c0392b" if avg_risk >= 0.35 else "#e67e22" if avg_risk >= 0.18 else "#27ae60"
+        mc1.markdown(
+            f'<div style="text-align:center;padding:0.8rem;background:{risk_color}10;border-radius:8px;border:1px solid {risk_color}30">'
+            f'<div style="font-size:1.8rem;font-weight:700;color:{risk_color}">{avg_risk:.0%}</div>'
+            f'<div style="font-size:0.8rem;color:#666">MHC-I Risk</div></div>',
+            unsafe_allow_html=True,
+        )
+        mc2.metric("Strong Binders", total_strong, help="Rank < 2%")
+        mc3.metric("Moderate Binders", total_moderate, help="Rank 2-10%")
+        mc4.metric("Validated Hits", total_validated, help="Matches to known epitopes")
+
+        st.markdown("")
+
+        # Dual pathway comparison
+        if any(chain_epitopes.get(name) for name in chains):
+            st.markdown("**Dual Pathway Comparison**")
+            pathway_rows = []
+            for cname in chains:
+                mhc2_eps = chain_epitopes.get(cname, [])
+                mhc1_rpt = chain_mhc1.get(cname)
+                if mhc1_rpt:
+                    pathway_rows.append({
+                        "Chain": cname,
+                        "MHC-II (ADA)": len(mhc2_eps),
+                        "MHC-I (Cytotoxic)": mhc1_rpt.total_epitopes_predicted,
+                        "MHC-II Density": round(len(mhc2_eps) / max(len(chains[cname]), 1) * 100, 1),
+                        "MHC-I Density": round(mhc1_rpt.total_epitopes_predicted / max(len(chains[cname]), 1) * 100, 1),
+                        "Cytotoxic Risk": mhc1_rpt.risk_category,
+                    })
+            if pathway_rows:
+                st.dataframe(pd.DataFrame(pathway_rows), hide_index=True, use_container_width=True)
+
+        # Per-chain details
+        for chain_name in chains:
+            mhc1_rpt = chain_mhc1.get(chain_name)
+            if not mhc1_rpt:
+                continue
+
+            with st.expander(f"{chain_name} — {mhc1_rpt.risk_category} risk ({mhc1_rpt.overall_cytotoxic_risk:.0%})", expanded=(len(chains) == 1)):
+                # Hotspot regions
+                if mhc1_rpt.hotspot_regions:
+                    st.markdown("**CTL Hotspot Regions**")
+                    hs_df = pd.DataFrame([
+                        {
+                            "Region": f"{hs['start']}-{hs['end']}",
+                            "Sequence": hs["sequence"][:20] + ("..." if len(hs["sequence"]) > 20 else ""),
+                            "Avg Risk": round(hs["avg_risk"], 2),
+                            "Max Risk": round(hs["max_risk"], 2),
+                            "Alleles": hs["max_alleles"],
+                            "Validated": "Yes" if hs.get("has_validated") else "—",
+                        }
+                        for hs in mhc1_rpt.hotspot_regions[:10]
+                    ])
+                    st.dataframe(hs_df, hide_index=True, use_container_width=True)
+
+                # Top epitopes
+                if mhc1_rpt.epitopes:
+                    st.markdown("**Top MHC-I Epitopes**")
+                    top_eps = sorted(mhc1_rpt.epitopes, key=lambda e: e.rank)[:20]
+                    ep_df = pd.DataFrame([
+                        {
+                            "Pos": f"{ep.start}-{ep.end}",
+                            "Peptide": ep.sequence,
+                            "Allele": ep.allele,
+                            "Rank (%)": round(ep.rank, 2),
+                            "Length": ep.length,
+                            "Source": ep.source,
+                        }
+                        for ep in top_eps
+                    ])
+                    st.dataframe(ep_df, hide_index=True, use_container_width=True, height=300)
+
+                # Validated epitope cross-reference
+                if mhc1_rpt.validated_details:
+                    st.markdown("**Validated Epitope Cross-Reference**")
+                    if mhc1_rpt.aav_epitope_recovery is not None:
+                        st.caption(f"Recovery rate: {mhc1_rpt.aav_epitope_recovery:.0%} of known epitopes detected")
+                    val_df = pd.DataFrame([
+                        {
+                            "Peptide": v["validated_peptide"],
+                            "Position": v["position"],
+                            "HLA": v["hla"],
+                            "Source": v["source"],
+                            "Recovered": "Yes" if v["is_recovered"] else "No",
+                        }
+                        for v in mhc1_rpt.validated_details
+                    ])
+                    st.dataframe(val_df, hide_index=True, use_container_width=True)
+
+                # Per-residue risk heatmap (Altair)
+                if mhc1_rpt.residue_risks:
+                    st.markdown("**Per-Residue Cytotoxic Risk**")
+                    risk_data = pd.DataFrame([
+                        {"Position": rr.position, "Risk": rr.mhc1_risk, "Alleles": rr.num_alleles_binding}
+                        for rr in mhc1_rpt.residue_risks
+                    ])
+                    risk_chart = alt.Chart(risk_data).mark_bar(width=1).encode(
+                        x=alt.X("Position:Q", title="Residue Position"),
+                        y=alt.Y("Risk:Q", title="MHC-I Risk", scale=alt.Scale(domain=[0, 1])),
+                        color=alt.Color("Risk:Q", scale=alt.Scale(scheme="reds"), legend=None),
+                        tooltip=["Position", "Risk", "Alleles"],
+                    ).properties(height=200)
+                    st.altair_chart(risk_chart, use_container_width=True)
+
+        # Data sources
+        with st.expander("Data Sources"):
+            first_report = next(iter(chain_mhc1.values()), None)
+            if first_report and first_report.data_references:
+                for key, val in first_report.data_references.items():
+                    st.caption(f"**{key}**: {val}")
+
+# ==============================
+# PART 2D — Composite Score
+# ==============================
+with tab_composite:
+    if not chains:
+        st.info("Paste a protein sequence in the sidebar to compute the composite score.")
+    else:
+        st.markdown("**4-Signal Composite Immunogenicity Score**")
+        st.caption(
+            "Fuses clinical benchmarks (IDC DB V1), sequence similarity, "
+            "dual-pathway epitope load (MHC-I + MHC-II), and AI synthesis."
+        )
+
+        # Aggregate epitope data across chains
+        total_mhc2 = sum(len(chain_epitopes.get(cname, [])) for cname in chains)
+        total_mhc2_hotspots = 0
+        total_mhc1 = sum(r.total_epitopes_predicted for r in chain_mhc1.values())
+        total_mhc1_hotspots = sum(len(r.hotspot_regions) for r in chain_mhc1.values())
+        mhc1_overall = sum(r.overall_cytotoxic_risk for r in chain_mhc1.values()) / max(len(chain_mhc1), 1) if chain_mhc1 else 0.0
+
+        # Estimate MHC-II hotspots from epitope clusters
+        for cname in chains:
+            eps = chain_epitopes.get(cname, [])
+            if eps:
+                positions = set()
+                for ep in eps:
+                    positions.update(range(ep.start, ep.end + 1))
+                if positions:
+                    sorted_pos = sorted(positions)
+                    clusters = 1
+                    for i in range(1, len(sorted_pos)):
+                        if sorted_pos[i] - sorted_pos[i-1] > 5:
+                            clusters += 1
+                    total_mhc2_hotspots += clusters
+
+        combined_seq = "".join(chains.values())
+
+        composite_key = f"composite_{hash(combined_seq)}"
+        if composite_key not in st.session_state:
+            comp = compute_composite_score(
+                sequence=combined_seq,
+                name="Candidate",
+                modality=modality,
+                route=route,
+                species=species,
+                indication=disease,
+                mhc2_epitope_count=total_mhc2,
+                mhc2_hotspot_count=total_mhc2_hotspots,
+                mhc2_overall_risk=risk_result.composite_score / 100.0,
+                mhc1_epitope_count=total_mhc1,
+                mhc1_hotspot_count=total_mhc1_hotspots,
+                mhc1_overall_risk=mhc1_overall,
+            )
+            st.session_state[composite_key] = comp
+        comp = st.session_state[composite_key]
+
+        # Hero composite score
+        comp_color = "#c0392b" if comp.composite_score >= 60 else "#e67e22" if comp.composite_score >= 40 else "#f39c12" if comp.composite_score >= 20 else "#27ae60"
+        col_comp, col_signals = st.columns([1, 3])
+
+        with col_comp:
+            st.markdown(
+                f'<div style="text-align:center;padding:1.5rem;background:{comp_color}10;border-radius:12px;border:2px solid {comp_color}">'
+                f'<div style="color:{comp_color};font-size:2.8rem;font-weight:700;line-height:1">{comp.composite_score:.0f}</div>'
+                f'<div style="color:{comp_color};font-size:0.9rem;font-weight:600;margin-top:0.3rem">{comp.composite_category}</div>'
+                f'<div style="font-size:0.75rem;color:#888;margin-top:0.3rem">'
+                f'95% CI: [{comp.confidence_interval[0]:.0f}, {comp.confidence_interval[1]:.0f}]</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+            st.markdown(
+                f'<div style="display:flex;justify-content:space-around;text-align:center">'
+                f'<div><div style="font-size:1.2rem;font-weight:600;color:#2563eb">{comp.humoral_risk:.0f}</div>'
+                f'<div style="font-size:0.7rem;color:#666">Humoral</div></div>'
+                f'<div><div style="font-size:1.2rem;font-weight:600;color:#dc2626">{comp.cytotoxic_risk:.0f}</div>'
+                f'<div style="font-size:0.7rem;color:#666">Cytotoxic</div></div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with col_signals:
+            signals = [
+                ("Clinical Benchmark", comp.benchmark_signal, "#3b82f6"),
+                ("Sequence Similarity", comp.similarity_signal, "#8b5cf6"),
+                ("Epitope Load", comp.epitope_signal, "#ef4444"),
+            ]
+            for sig_name, sig, color in signals:
+                bar_width = min(sig.score, 100)
+                st.markdown(
+                    f'<div style="margin-bottom:0.8rem">'
+                    f'<div style="display:flex;justify-content:space-between;margin-bottom:2px">'
+                    f'<span style="font-size:0.85rem;font-weight:600">{sig_name} ({sig.weight:.0%})</span>'
+                    f'<span style="font-size:0.85rem;font-weight:700;color:{color}">{sig.score:.0f}/100</span>'
+                    f'</div>'
+                    f'<div style="background:#e5e7eb;border-radius:4px;height:8px;overflow:hidden">'
+                    f'<div style="background:{color};height:100%;width:{bar_width}%;border-radius:4px"></div>'
+                    f'</div>'
+                    f'<div style="font-size:0.72rem;color:#888;margin-top:2px">{sig.explanation[:120]}{"..." if len(sig.explanation) > 120 else ""}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Risk flags
+        if comp.flags:
+            st.markdown("")
+            st.markdown("**Risk Flags**")
+            for flag in comp.flags:
+                st.markdown(
+                    f'<div style="padding:6px 10px;background:#fef2f2;border-left:3px solid #dc2626;'
+                    f'border-radius:4px;margin-bottom:4px;font-size:0.85rem">{flag}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Signal details
+        with st.expander("Signal Details"):
+            for sig_name, sig, _ in signals:
+                st.markdown(f"**{sig_name}** (weight: {sig.weight:.0%}, confidence: {sig.confidence:.0%})")
+                st.markdown(sig.explanation)
+                if sig.data_sources:
+                    for ds in sig.data_sources:
+                        st.caption(f"  {ds}")
+                st.markdown("")
+
+        # Data references
+        with st.expander("Data Sources & References"):
+            st.caption(f"Total data sources: {comp.total_data_sources}")
+            for key, val in comp.data_references.items():
+                st.caption(f"**{key}**: {val}")
 
 # ==============================
 # PART 3 — Redesign Copilot (per-chain)
