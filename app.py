@@ -1093,8 +1093,10 @@ def render_results(report, seq_clean, seq_name, pdb_id):
 
     # ── Tab 4: Clinical context ──
     with tab4:
-        st.markdown("**Comparable therapeutics from IDC DB V1**")
-        st.caption("3,334 ADA datapoints across 218 therapeutics and 726 clinical trials")
+        ctx = st.session_state.get("clinical_context", {})
+        ctx_modality = ctx.get("modality", "All")
+        st.markdown(f"**Comparable therapeutics from IDC DB V1** ({ctx_modality})")
+        st.caption("Showing comparables filtered by modality. 3,334 ADA datapoints across 218 therapeutics and 726 clinical trials.")
         if report.comparable_therapeutics:
             for comp in report.comparable_therapeutics:
                 ada_color = "#dc2626" if comp['median_ada_freq'] > 30 else "#ea580c" if comp['median_ada_freq'] > 10 else "#0891b2"
@@ -1829,11 +1831,15 @@ if run_clicked and seq_input:
             progress.progress(10)
             
         # Run the actual analysis
+        # Use modality from clinical context
+        ctx = st.session_state.get("clinical_context", {})
+        analysis_modality = ctx.get("modality", "Monoclonal antibody")
+        
         report = run_immunogenicity_assessment(
             sequence=seq_clean, name=seq_name or "Query",
             pdb_id=pdb_id if pdb_id else None, pdb_chain="A",
             idc_data_path="idc_db_v1_table_s4.xlsx",
-            species=species, modality="Monoclonal antibody", verbose=False,
+            species=species, modality=analysis_modality, verbose=False,
         )
         
         with progress_container:

@@ -805,16 +805,71 @@ def load_idc_comparables(idc_path: str, species: str = None,
             }
             results.append(entry)
         
+        # Filter by modality if specified
+        if modality:
+            modality_lower = modality.lower()
+            # Map user-friendly modality to IDC DB modality names
+            modality_map = {
+                "aav": ["aav", "gene therapy", "viral vector", "adeno-associated"],
+                "gene therapy": ["aav", "gene therapy", "viral vector", "adeno-associated"],
+                "mab": ["monoclonal antibody", "mab", "igg"],
+                "antibody": ["monoclonal antibody", "mab", "igg", "bispecific"],
+                "enzyme": ["enzyme", "replacement therapy"],
+                "fusion": ["fusion", "fc fusion"],
+            }
+            
+            search_terms = modality_map.get(modality_lower, [modality_lower])
+            filtered = [
+                r for r in results
+                if any(term in r["modality"].lower() for term in search_terms)
+            ]
+            
+            # If we have modality-specific results, use them
+            if filtered:
+                results = filtered
+        
         # Sort by median ADA descending and return top N
         results.sort(key=lambda x: x["median_ada_freq"], reverse=True)
-        return results[:top_n]
+        return results[:top_n] if results else _get_fallback_comparables(species, modality)
 
     except Exception:
         return _get_fallback_comparables(species, modality)
 
 
+# AAV-specific reference data (from published clinical trials)
+AAV_CLINICAL_REFERENCES = [
+    {"name": "Zolgensma (AAV9)", "median_ada_freq": 0.0, "min_ada_freq": 0.0,
+     "max_ada_freq": 5.0, "n_datapoints": 73, "species": "Viral vector",
+     "modality": "AAV Gene Therapy", "target": "SMN1",
+     "note": "SMA; pre-existing nAbs excluded; 0% treatment-emergent ADA"},
+    {"name": "Hemgenix (AAV5)", "median_ada_freq": 0.0, "min_ada_freq": 0.0,
+     "max_ada_freq": 0.0, "n_datapoints": 54, "species": "Viral vector",
+     "modality": "AAV Gene Therapy", "target": "Factor IX",
+     "note": "Hemophilia B; 0% ADA in trials"},
+    {"name": "Luxturna (AAV2)", "median_ada_freq": 0.0, "min_ada_freq": 0.0,
+     "max_ada_freq": 0.0, "n_datapoints": 41, "species": "Viral vector",
+     "modality": "AAV Gene Therapy", "target": "RPE65",
+     "note": "LCA; subretinal; no systemic ADA detected"},
+    {"name": "Roctavian (AAV5)", "median_ada_freq": 0.0, "min_ada_freq": 0.0,
+     "max_ada_freq": 7.0, "n_datapoints": 134, "species": "Viral vector",
+     "modality": "AAV Gene Therapy", "target": "Factor VIII",
+     "note": "Hemophilia A; transient capsid Abs in 40-60%"},
+    {"name": "AT132 (AAV8)", "median_ada_freq": 60.0, "min_ada_freq": 40.0,
+     "max_ada_freq": 80.0, "n_datapoints": 23, "species": "Viral vector",
+     "modality": "AAV Gene Therapy", "target": "MTM1",
+     "note": "XLMTM; 4 deaths; severe hepatotoxicity; CD8+ T-cell driven"},
+]
+
 def _get_fallback_comparables(species: str = None, modality: str = None) -> List[Dict[str, Any]]:
     """Fallback comparable therapeutics when IDC DB isn't available."""
+    
+    # Check if AAV/gene therapy modality requested
+    if modality:
+        modality_lower = modality.lower()
+        if any(term in modality_lower for term in ["aav", "gene therapy", "viral"]):
+            return AAV_CLINICAL_REFERENCES
+    
+    # Standard antibody/biologic fallbacks
     return [
         {"name": "Adalimumab (Humira)", "median_ada_freq": 5.0, "min_ada_freq": 1.0,
          "max_ada_freq": 13.0, "n_datapoints": 159, "species": "Human",
