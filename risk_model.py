@@ -31,6 +31,16 @@ class TimeAdaResult:
 
 
 @dataclass
+class ConfidenceInfo:
+    """Prediction confidence assessment."""
+    level: str  # "High", "Moderate", "Low"
+    color: str
+    reasons: list
+    prediction_range: tuple  # (low, high) in %
+    n_similar_drugs: int
+
+
+@dataclass
 class RiskResult:
     composite_score: float
     risk_tier: str
@@ -38,11 +48,13 @@ class RiskResult:
     lookup_score: float
     sequence_score: float | None
     feature_score: float
+    ml_score: float | None
     nearest_drugs: list
     risk_factors: list = field(default_factory=list)
     lookup_level: str = ""
     nada: NadaResult | None = None
     time_ada: TimeAdaResult | None = None
+    confidence: ConfidenceInfo | None = None
 
 
 def get_risk_tier(score: float):
@@ -250,6 +262,92 @@ def estimate_time_ada(composite_ada, modality, time_ada_lookup):
     )
 
 
+def _estimate_confidence(composite, lookup_val, seq_val, feature_val, ml_val,
+                         alignment_results, lookup_level):
+    """Estimate prediction confidence based on agreement between components
+    and availability of data."""
+    reasons = []
+    scores = [s for s in [lookup_val, seq_val, feature_val, ml_val] if s is not None]
+
+    # 1. Component agreement — if all components point the same direction, higher confidence
+    if len(scores) >= 3:
+        spread = max(scores) - min(scores)
+        if spread < 15:
+            reasons.append("Components agree well (spread < 15pp)")
+            agreement_score = 2
+        elif spread < 30:
+            reasons.append(f"Moderate component disagreement (spread {spread:.0f}pp)")
+            agreement_score = 1
+        else:
+            reasons.append(f"High component disagreement (spread {spread:.0f}pp)")
+            agreement_score = 0
+    else:
+        agreement_score = 0
+        reasons.append("Limited scoring components available")
+
+    # 2. Sequence match quality
+    seq_quality = 0
+    if alignment_results:
+        best_identity = max(r.pct_identity for r in alignment_results)
+        if best_identity > 0.90:
+            seq_quality = 2
+            reasons.append(f"Strong sequence match ({best_identity:.0%} identity)")
+        elif best_identity > 0.60:
+            seq_quality = 1
+            reasons.append(f"Moderate sequence match ({best_identity:.0%} identity)")
+        else:
+            reasons.append(f"Weak sequence match ({best_identity:.0%} identity)")
+    else:
+        reasons.append("No sequence provided — prediction based on class averages only")
+
+    # 3. Lookup data density
+    lookup_quality = 0
+    if "cohorts" in lookup_level:
+        import re
+        cohort_match = re.search(r"(\d+) cohorts", lookup_level)
+        patient_match = re.search(r"(\d+) patients", lookup_level)
+        if cohort_match:
+            n_cohorts = int(cohort_match.group(1))
+            if n_cohorts >= 20:
+                lookup_quality = 2
+            elif n_cohorts >= 5:
+                lookup_quality = 1
+        if patient_match:
+            n_patients = int(patient_match.group(1))
+            if n_patients > 1000:
+                reasons.append(f"Backed by {n_patients:,} patient-observations")
+
+    # Total confidence
+    total = agreement_score + seq_quality + lookup_quality
+    if total >= 4:
+        level, color = "High", "#2ecc71"
+    elif total >= 2:
+        level, color = "Moderate", "#f39c12"
+    else:
+        level, color = "Low", "#e74c3c"
+
+    # Prediction range
+    # Based on benchmark: median AE is ~7pp, worst is ~60pp
+    if level == "High":
+        margin = 10
+    elif level == "Moderate":
+        margin = 20
+    else:
+        margin = 35
+
+    pred_range = (round(max(0, composite - margin), 1), round(min(100, composite + margin), 1))
+
+    n_similar = len(alignment_results) if alignment_results else 0
+
+    return ConfidenceInfo(
+        level=level,
+        color=color,
+        reasons=reasons,
+        prediction_range=pred_range,
+        n_similar_drugs=n_similar,
+    )
+
+
 def predict_ada(
     modality: str,
     species: str,
@@ -269,6 +367,7 @@ def predict_ada(
         - Lookup (40%): Historical ADA rates from clinical data
         - Sequence (35%): Nearest-neighbor ADA from sequence alignment
         - Feature (25%): Adjustments from species/conjugate/route/expression
+        - ML model: Ensemble member (when available)
     """
     # Lookup component
     lookup_val, lookup_level = _lookup_score(route, disease, modality, lookup_tables)
@@ -283,7 +382,8 @@ def predict_ada(
         species, conjugate, route, modality, expression_system
     )
 
-    # Compute composite
+    # Compute composite — rule-based ensemble
+    ml_val = None
     if seq_val is not None:
         composite = (
             W_LOOKUP * lookup_val
@@ -300,6 +400,12 @@ def predict_ada(
     composite = max(0.0, min(100.0, composite))
 
     tier_name, tier_color = get_risk_tier(composite)
+
+    # Confidence estimation
+    confidence = _estimate_confidence(
+        composite, lookup_val, seq_val, feature_val, ml_val,
+        alignment_results, lookup_level,
+    )
 
     # nADA estimate
     nada = None
@@ -318,9 +424,11 @@ def predict_ada(
         lookup_score=round(lookup_val, 1),
         sequence_score=round(seq_val, 1) if seq_val is not None else None,
         feature_score=round(feature_val, 1),
+        ml_score=round(ml_val, 1) if ml_val is not None else None,
         nearest_drugs=nearest_drugs,
         risk_factors=risk_factors,
         lookup_level=lookup_level,
         nada=nada,
         time_ada=time_ada,
+        confidence=confidence,
     )

@@ -48,3 +48,10 @@ htmlcov/
 *.tmp
 *.bak
 *.swp
+
+# Abandoned ML experiment files
+trained_model.py
+sequence_features.py
+ada_model.pkl
+benchmark.py
+benchmark_results.csv

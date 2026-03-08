@@ -23,6 +23,7 @@ from sequence_engine import (
 )
 from claude_report import generate_risk_memo
 from deimmunize import deimmunize_epitopes, generate_redesigned_sequences
+from tamarind_integration import fold_protein, suggest_redesigns, _get_api_key
 
 st.set_page_config(
     page_title="SafeBind Risk",
@@ -55,6 +56,8 @@ st.sidebar.divider()
 dose = st.sidebar.text_input("Dose Level", placeholder="e.g., 10 mg/kg")
 schedule = st.sidebar.text_input("Dosing Schedule", placeholder="e.g., Q2W IV")
 
+tamarind_key = _get_api_key()
+
 analyze = st.sidebar.button("Analyze Risk", type="primary", use_container_width=True)
 
 # --- Main Area ---
@@ -70,6 +73,7 @@ if not analyze:
     - **Empirical Benchmarking** — Historical ADA rates matched by route, disease, and modality
     - **Sequence Similarity** — Alignment to 222 reference sequences from approved drugs
     - **T-cell Epitope Prediction** — IEDB MHC-II binding analysis per chain
+    - **3D Structure + AI Redesign** — ESMFold folding + ProteinMPNN deimmunization (via Tamarind Bio)
     - **AI Synthesis** — Claude-powered risk memo with per-chain modification recommendations
 
     Paste multi-chain FASTA (with `>headers`) or a single raw sequence, configure in sidebar, and click **Analyze Risk**.
@@ -106,6 +110,7 @@ if sequence_input.strip():
 chain_alignments = {}   # {chain_name: [AlignmentResult]}
 chain_epitopes = {}     # {chain_name: [EpitopeResult]}
 chain_diffs = {}        # {chain_name: [(pos, q, r)]}
+chain_pdb = {}          # {chain_name: pdb_string} — populated in Tab 2 if Tamarind key present
 
 # Run alignment per chain
 for chain_name, seq in chains.items():
@@ -173,25 +178,39 @@ with tab1:
 
     with col_tier:
         st.markdown("#### Score Breakdown")
-        breakdown = {
-            "Component": ["Clinical Lookup", "Sequence Similarity", "Feature Adjustment"],
-            "Score (%)": [
-                risk_result.lookup_score,
-                risk_result.sequence_score if risk_result.sequence_score is not None else "N/A",
-                risk_result.feature_score,
-            ],
-            "Weight": [
-                f"{W_LOOKUP:.0%}",
-                f"{W_SEQUENCE:.0%}" if risk_result.sequence_score is not None else "0% (redistributed)",
-                f"{W_FEATURE:.0%}",
-            ],
-            "Source": [
-                risk_result.lookup_level,
-                f"Top {len(best_alignments)} matches across {len(chains)} chain(s)" if best_alignments else "No sequence",
-                "Modality + Species + Conjugate + Route",
-            ],
-        }
+        components = ["Clinical Lookup", "Sequence Similarity", "Feature Adjustment"]
+        scores = [
+            risk_result.lookup_score,
+            risk_result.sequence_score if risk_result.sequence_score is not None else "N/A",
+            risk_result.feature_score,
+        ]
+        weights = [
+            f"{W_LOOKUP:.0%}",
+            f"{W_SEQUENCE:.0%}" if risk_result.sequence_score is not None else "0% (redistributed)",
+            f"{W_FEATURE:.0%}",
+        ]
+        sources = [
+            risk_result.lookup_level,
+            f"Top {len(best_alignments)} matches across {len(chains)} chain(s)" if best_alignments else "No sequence",
+            "Modality + Species + Conjugate + Route",
+        ]
+
+        breakdown = {"Component": components, "Score (%)": scores, "Weight": weights, "Source": sources}
         st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
+
+        # Confidence panel
+        if risk_result.confidence:
+            conf = risk_result.confidence
+            low, high = conf.prediction_range
+            st.markdown(
+                f"""<div style="padding:8px 12px; background:{conf.color}18; border-radius:6px; border-left:3px solid {conf.color}; margin-top:8px">
+                <strong style="color:{conf.color}">Confidence: {conf.level}</strong>
+                &nbsp;—&nbsp; Predicted range: {low:.0f}–{high:.0f}%
+                </div>""",
+                unsafe_allow_html=True,
+            )
+            for reason in conf.reasons:
+                st.caption(f"• {reason}")
 
     st.divider()
 
@@ -334,15 +353,12 @@ with tab2:
 
                     ep_results = chain_epitopes[ep_key]
 
-                    # Try 3D view
-                    tamarind_key = os.environ.get("TAMARIND_API_KEY")
+                    # Try 3D folding with Tamarind ESMFold
                     pdb_data = None
                     if tamarind_key:
-                        try:
-                            from tamarind_integration import fold_protein
-                            pdb_data = fold_protein(chain_seq, tamarind_key)
-                        except Exception:
-                            pass
+                        pdb_data = fold_protein(chain_seq, tamarind_key)
+                        if pdb_data:
+                            chain_pdb[chain_name] = pdb_data
 
                     if pdb_data:
                         try:
@@ -351,17 +367,37 @@ with tab2:
                             view = py3Dmol.view(width=600, height=400)
                             view.addModel(pdb_data, "pdb")
                             view.setStyle({"cartoon": {"color": "spectrum"}})
+
+                            # Overlay epitopes in red
                             if ep_results:
                                 for ep in ep_results:
                                     for pos in range(ep.start, ep.end + 1):
-                                        view.addStyle({"resi": pos}, {"cartoon": {"color": "red"}, "stick": {"color": "red"}})
+                                        view.addStyle(
+                                            {"resi": pos},
+                                            {"cartoon": {"color": "red"}, "stick": {"color": "red", "radius": 0.15}},
+                                        )
+
                             view.zoomTo()
                             stmol.showmol(view, height=400, width=600)
-                        except Exception:
+                            st.caption("Red = predicted T-cell epitope hotspots | Spectrum = N→C terminus")
+
+                            # Download PDB
+                            st.download_button(
+                                f"Download PDB",
+                                pdb_data,
+                                f"safebind_{chain_name.replace(' ', '_')}.pdb",
+                                mime="chemical/x-pdb",
+                                key=f"pdb_dl_{chain_name}",
+                            )
+                        except Exception as e:
+                            st.warning(f"3D viewer error: {e}")
                             pdb_data = None
 
                     if not pdb_data:
-                        # Sequence view with epitope highlighting
+                        # Fallback: sequence view with epitope highlighting
+                        if not tamarind_key:
+                            st.info("Add Tamarind API key in sidebar for 3D protein structure visualization.")
+
                         if ep_results:
                             epitope_positions = set()
                             for ep in ep_results:
@@ -431,12 +467,14 @@ with tab2:
             summary_rows = []
             for name in chains:
                 eps = chain_epitopes.get(name, [])
+                has_3d = "Yes" if name in chain_pdb else "No"
                 summary_rows.append({
                     "Chain": name,
                     "Length (aa)": len(chains[name]),
                     "Epitopes": len(eps),
                     "Density (/100aa)": round(compute_epitope_density(eps, len(chains[name])), 1) if eps else 0,
                     "Top Binder Rank": round(eps[0].percentile_rank, 2) if eps else "—",
+                    "3D Structure": has_3d,
                 })
             st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
 
@@ -456,6 +494,7 @@ with tab3:
     }
 
     if chains and any(chain_epitopes.get(name) for name in chains):
+        # --- Rule-Based Deimmunization ---
         st.markdown("### Deimmunized Sequence Variants")
         st.caption("Per-chain deimmunization: anchor residues in predicted T-cell epitopes are substituted to disrupt MHC-II binding.")
 
@@ -545,7 +584,6 @@ with tab3:
             st.markdown("### Download Combined Multi-Chain FASTA")
             st.caption("Downloads all chains at the selected deimmunization level in a single FASTA file.")
 
-            # Find which variant levels are available across all chains
             variant_levels = ["Conservative", "Moderate", "Aggressive"]
             for level in variant_levels:
                 combined_fasta = ""
@@ -560,7 +598,6 @@ with tab3:
                             chain_count += 1
                             break
                     else:
-                        # No variant at this level — use original
                         safe_name = cname.replace(" ", "_")
                         combined_fasta += f">{safe_name}|original\n"
                         combined_fasta += "\n".join(chains[cname][k:k+60] for k in range(0, len(chains[cname]), 60))
@@ -575,6 +612,77 @@ with tab3:
                         mime="text/plain",
                         key=f"dl_combined_{level}",
                     )
+
+        # --- ProteinMPNN AI Redesign ---
+        if tamarind_key:
+            st.divider()
+            st.markdown("### ProteinMPNN Structure-Aware Redesign")
+            st.caption(
+                "Uses ESMFold-predicted structure + ProteinMPNN to redesign epitope hotspot residues "
+                "while preserving structural stability. Only mutates at predicted T-cell epitope positions."
+            )
+
+            for chain_name, chain_seq in chains.items():
+                ep_results = chain_epitopes.get(chain_name, [])
+                if not ep_results:
+                    continue
+
+                # Collect hotspot positions from epitopes
+                hotspot_positions = set()
+                for ep in ep_results:
+                    # Target anchor positions (P1, P4, P6, P9 within each epitope)
+                    for offset in [0, 3, 5, 8]:
+                        pos = ep.start + offset
+                        if pos <= len(chain_seq):
+                            hotspot_positions.add(pos)
+
+                if not hotspot_positions:
+                    continue
+
+                pdb_for_chain = chain_pdb.get(chain_name)
+
+                with st.expander(f"ProteinMPNN — {chain_name} ({len(hotspot_positions)} designable positions)", expanded=False):
+                    st.markdown(f"**Designable positions:** {len(hotspot_positions)} anchor residues from {len(ep_results)} epitopes")
+
+                    if st.button(f"Run ProteinMPNN for {chain_name}", key=f"mpnn_run_{chain_name}"):
+                        mpnn_results = suggest_redesigns(
+                            chain_seq, sorted(hotspot_positions), tamarind_key,
+                            n_designs=3, pdb_data=pdb_for_chain,
+                        )
+
+                        if mpnn_results:
+                            for idx, result in enumerate(mpnn_results):
+                                mpnn_seq = result["sequence"]
+                                mpnn_score = result.get("score", 0)
+
+                                # Count mutations vs original
+                                mutations = []
+                                for j, (orig, new) in enumerate(zip(chain_seq, mpnn_seq)):
+                                    if orig != new:
+                                        mutations.append((j + 1, orig, new))
+
+                                st.markdown(f"**Design {idx + 1}** — {len(mutations)} mutations | Score: {mpnn_score:.3f}")
+
+                                if mutations:
+                                    mpnn_mut_df = pd.DataFrame([
+                                        {"Position": pos, "Original": orig, "New": new}
+                                        for pos, orig, new in mutations
+                                    ])
+                                    st.dataframe(mpnn_mut_df, hide_index=True)
+
+                                # Download
+                                safe_name = chain_name.replace(" ", "_")
+                                mpnn_fasta = f">{safe_name}|ProteinMPNN_design_{idx+1}|{len(mutations)}_mutations|score={mpnn_score:.3f}\n"
+                                mpnn_fasta += "\n".join(mpnn_seq[k:k+60] for k in range(0, len(mpnn_seq), 60))
+                                st.download_button(
+                                    f"Download Design {idx + 1} FASTA",
+                                    mpnn_fasta,
+                                    f"safebind_{safe_name}_mpnn_design_{idx+1}.fasta",
+                                    mime="text/plain",
+                                    key=f"dl_mpnn_{safe_name}_{idx}",
+                                )
+                        else:
+                            st.warning("ProteinMPNN returned no results. The job may have failed or timed out.")
 
     elif chains:
         st.info("Waiting for epitope predictions (IEDB API) to generate redesigned sequences.")
