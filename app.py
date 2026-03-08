@@ -31,7 +31,11 @@ from immunogenicity_core_2 import (
     fetch_tamarind_pdb,
 )
 
-TAMARIND_API_KEY = "ca6b27d3-b2b7-486e-81b9-774f47e8c37f"
+try:
+    from api_keys import TAMARIND_API_KEY, ANTHROPIC_API_KEY  # local-only, gitignored
+except ImportError:
+    TAMARIND_API_KEY = os.environ.get("TAMARIND_API_KEY", "")
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # ── Page config ──────────────────────────────────────────────
 st.set_page_config(
@@ -199,7 +203,7 @@ PRELOADED = {
 # ── Claude API integration ───────────────────────────────────
 def generate_claude_report(report_data: dict) -> str:
     """Use Claude API to generate a natural language risk narrative."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return ""
 
@@ -549,10 +553,10 @@ if run_clicked and seq_input:
 
         # ── Tab 5: Claude AI report ──
         with tab5:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
 
             if not api_key:
-                st.warning("Set the ANTHROPIC_API_KEY environment variable to generate an AI-powered risk narrative.")
+                st.warning("No Anthropic API key configured.")
             else:
                 progress.progress(90, text="Generating AI risk report with Claude...")
 
