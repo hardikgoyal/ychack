@@ -280,6 +280,24 @@ with st.sidebar:
         st.caption(f"Species: {species} | Length: {len(seq_input)} aa")
 
     st.markdown("---")
+    
+    # Clinical context (affects risk interpretation)
+    with st.expander("⚙️ Clinical Context (optional)", expanded=False):
+        route = st.selectbox("Route of administration", ["IV (intravenous)", "SC (subcutaneous)", "Unknown"])
+        indication = st.selectbox("Disease indication", [
+            "Oncology", "Autoimmune/Inflammation", "Healthy volunteers", 
+            "Metabolic/Enzyme replacement", "Other/Unknown"
+        ])
+        backbone = st.selectbox("Antibody backbone", ["IgG4", "IgG1", "IgG2", "Unknown"])
+        immunosuppressants = st.checkbox("Patient on immunosuppressants (MTX, etc.)")
+    
+    # Store clinical context in session state
+    st.session_state["clinical_context"] = {
+        "route": route, "indication": indication, 
+        "backbone": backbone, "immunosuppressants": immunosuppressants
+    }
+
+    st.markdown("---")
 
     # Run button
     run_clicked = st.button("🔬 Analyze Immunogenicity", type="primary", use_container_width=True)
@@ -298,25 +316,102 @@ with st.sidebar:
 
 
 # ── Helpers ──────────────────────────────────────────────────
+def compute_clinical_adjustment(raw_risk: float, context: dict) -> tuple:
+    """Apply clinical context adjustments based on IDC DB V1 findings.
+    Returns (adjusted_risk, adjustment_factors).
+    """
+    factors = []
+    multiplier = 1.0
+    
+    # Route: SC has ~2x higher ADA than IV (Bococizumab: 46.7% SC vs 5.9% IV)
+    route = context.get("route", "Unknown")
+    if "IV" in route:
+        multiplier *= 0.5
+        factors.append("IV route: -50% (lower ADA vs SC)")
+    elif "SC" in route:
+        multiplier *= 1.2
+        factors.append("SC route: +20% (higher ADA than IV)")
+    
+    # Indication: Oncology patients often immunosuppressed
+    indication = context.get("indication", "Unknown")
+    if indication == "Oncology":
+        multiplier *= 0.4
+        factors.append("Oncology: -60% (immunosuppressed patients)")
+    elif "Autoimmune" in indication:
+        multiplier *= 1.3
+        factors.append("Autoimmune: +30% (hyperactive immune system)")
+    elif "Metabolic" in indication or "Enzyme" in indication:
+        multiplier *= 1.5
+        factors.append("Enzyme replacement: +50% (high ADA historically)")
+    
+    # Backbone: IgG4 is less immunostimulatory
+    backbone = context.get("backbone", "Unknown")
+    if backbone == "IgG4":
+        multiplier *= 0.7
+        factors.append("IgG4 backbone: -30% (less immunostimulatory)")
+    elif backbone == "IgG1":
+        multiplier *= 1.0
+        factors.append("IgG1 backbone: baseline")
+    
+    # Immunosuppressants
+    if context.get("immunosuppressants"):
+        multiplier *= 0.5
+        factors.append("Immunosuppressants: -50%")
+    
+    adjusted = min(raw_risk * multiplier, 1.0)
+    return adjusted, factors
+
+
 def render_results(report, seq_clean, seq_name, pdb_id):
     """Render all metrics + tabs from a completed AssessmentReport."""
+    # Get clinical context
+    context = st.session_state.get("clinical_context", {})
+    adjusted_risk, adj_factors = compute_clinical_adjustment(report.overall_risk_score, context)
+    
+    # Determine which risk to emphasize
+    has_context = any(context.get(k) not in [None, "Unknown", False, "Other/Unknown"] 
+                      for k in ["route", "indication", "backbone", "immunosuppressants"])
+    
+    display_risk = adjusted_risk if has_context else report.overall_risk_score
+    
+    # Categorize adjusted risk
+    if display_risk >= 0.6:
+        adj_category = "VERY HIGH"
+    elif display_risk >= 0.4:
+        adj_category = "HIGH"
+    elif display_risk >= 0.2:
+        adj_category = "MODERATE"
+    else:
+        adj_category = "LOW"
+    
     risk_class = {
         "LOW": "risk-low", "MODERATE": "risk-moderate",
         "HIGH": "risk-high", "VERY HIGH": "risk-very-high"
-    }.get(report.risk_category, "risk-moderate")
+    }.get(adj_category if has_context else report.risk_category, "risk-moderate")
 
     col1, col2, col3, col4, col5 = st.columns(5)
     strong = len([e for e in report.t_cell_epitopes if e.rank < 10])
+    
     with col1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value {risk_class}">{report.overall_risk_score:.0%}</div><div class="metric-label">Overall Risk</div></div>', unsafe_allow_html=True)
+        if has_context:
+            st.markdown(f'<div class="metric-card"><div class="metric-value {risk_class}">{adjusted_risk:.0%}</div><div class="metric-label">Adjusted Risk</div></div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="metric-card"><div class="metric-value {risk_class}">{report.overall_risk_score:.0%}</div><div class="metric-label">Sequence Risk</div></div>', unsafe_allow_html=True)
     with col2:
-        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#111827;">{report.risk_category}</div><div class="metric-label">Risk Category</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#111827;">{adj_category if has_context else report.risk_category}</div><div class="metric-label">Risk Category</div></div>', unsafe_allow_html=True)
     with col3:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#ea580c;">{strong}</div><div class="metric-label">T-cell Epitopes</div></div>', unsafe_allow_html=True)
     with col4:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#0891b2;">{len(report.b_cell_epitopes)}</div><div class="metric-label">B-cell Epitopes</div></div>', unsafe_allow_html=True)
     with col5:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#7c3aed;">{len(report.hotspot_regions)}</div><div class="metric-label">Hotspot Regions</div></div>', unsafe_allow_html=True)
+    
+    # Show adjustment explanation if context was provided
+    if has_context and adj_factors:
+        with st.expander("📊 Risk adjustment factors applied", expanded=True):
+            st.markdown(f"**Raw sequence risk:** {report.overall_risk_score:.0%} → **Context-adjusted:** {adjusted_risk:.0%}")
+            for f in adj_factors:
+                st.markdown(f"- {f}")
 
     st.markdown("<br>", unsafe_allow_html=True)
     tab1, tab2, tab2b, tab3, tab4, tab5 = st.tabs([
