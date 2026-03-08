@@ -5,8 +5,29 @@ from config import (
     W_LOOKUP, W_SEQUENCE, W_FEATURE,
     GLOBAL_BASELINE_ADA, SPECIES_ADA, CONJUGATE_ADA,
     ROUTE_MULTIPLIER, MODALITY_ADA, RISK_TIERS,
-    MIN_IDENTITY_THRESHOLD,
+    MIN_IDENTITY_THRESHOLD, EXPRESSION_SYSTEM_ADA,
+    NADA_SEVERITY, TIME_TO_ADA_MULTIPLIER,
 )
+
+
+@dataclass
+class NadaResult:
+    """Neutralizing ADA risk assessment."""
+    nada_pct: float
+    nada_ratio: float  # nADA/ADA ratio
+    severity: str
+    severity_color: str
+    description: str
+    source: str  # Where the estimate came from
+
+
+@dataclass
+class TimeAdaResult:
+    """Time-to-ADA profile."""
+    expected_onset: str  # Which time bin has highest risk
+    peak_ada_pct: float
+    time_multiplier: float
+    profile: list  # [(time_bin, ada_pct, n_cohorts)]
 
 
 @dataclass
@@ -19,7 +40,9 @@ class RiskResult:
     feature_score: float
     nearest_drugs: list
     risk_factors: list = field(default_factory=list)
-    lookup_level: str = ""  # Which lookup granularity was used
+    lookup_level: str = ""
+    nada: NadaResult | None = None
+    time_ada: TimeAdaResult | None = None
 
 
 def get_risk_tier(score: float):
@@ -89,12 +112,12 @@ def _sequence_score(alignment_results, drug_ada_map):
     return weighted_ada, alignment_results
 
 
-def _feature_adjustment(species, conjugate, route, modality):
-    """Additive deltas from species/conjugate/route/modality baselines relative to global mean."""
+def _feature_adjustment(species, conjugate, route, modality, expression_system=None):
+    """Additive deltas from species/conjugate/route/modality/expression baselines."""
     delta = 0.0
     factors = []
 
-    # Modality delta — often the largest signal
+    # Modality delta
     modality_ada = MODALITY_ADA.get(modality, GLOBAL_BASELINE_ADA)
     modality_delta = modality_ada - GLOBAL_BASELINE_ADA
     delta += modality_delta
@@ -126,7 +149,105 @@ def _feature_adjustment(species, conjugate, route, modality):
         direction = "increases" if route_effect > 0 else "decreases"
         factors.append(f"{route} administration {direction} risk (×{route_mult:.1f})")
 
+    # Expression system delta
+    if expression_system and expression_system != "Undetermined":
+        expr_ada = EXPRESSION_SYSTEM_ADA.get(expression_system, GLOBAL_BASELINE_ADA)
+        expr_delta = expr_ada - GLOBAL_BASELINE_ADA
+        delta += expr_delta
+        if abs(expr_delta) > 2:
+            direction = "increases" if expr_delta > 0 else "decreases"
+            factors.append(f"{expression_system} expression {direction} risk by {abs(expr_delta):.0f}pp")
+
     return GLOBAL_BASELINE_ADA + delta, factors
+
+
+def estimate_nada(composite_ada, modality, route, nada_lookup):
+    """Estimate neutralizing ADA risk from composite ADA score + nADA lookup.
+
+    Returns NadaResult.
+    """
+    modality_col = "Protein Modality"
+    route_col = "Therapeutic Route of Administration"
+
+    # Try modality + route specific nADA ratio
+    by_mr = nada_lookup["by_mod_route"]
+    match = by_mr[(by_mr[modality_col] == modality) & (by_mr[route_col] == route)]
+    if len(match) > 0 and match.iloc[0]["n_cohorts"] >= 3:
+        ratio = match.iloc[0]["nada_ratio"]
+        source = f"Modality + Route ({int(match.iloc[0]['n_cohorts'])} cohorts)"
+    else:
+        # Fallback to modality only
+        by_m = nada_lookup["by_mod"]
+        match = by_m[by_m[modality_col] == modality]
+        if len(match) > 0 and match.iloc[0]["n_cohorts"] >= 3:
+            ratio = match.iloc[0]["nada_ratio"]
+            source = f"Modality ({int(match.iloc[0]['n_cohorts'])} cohorts)"
+        else:
+            ratio = nada_lookup["global_ratio"]
+            source = "Global baseline"
+
+    # Cap ratio at 1.0 (nADA can't exceed ADA)
+    ratio = min(ratio, 1.0)
+    nada_pct = composite_ada * ratio
+
+    # Determine severity tier
+    severity = "Low nADA Risk"
+    severity_color = "#2ecc71"
+    description = "Most ADA are non-neutralizing"
+    for threshold, name, color, desc in NADA_SEVERITY:
+        if nada_pct <= threshold:
+            severity = name
+            severity_color = color
+            description = desc
+            break
+
+    return NadaResult(
+        nada_pct=round(nada_pct, 1),
+        nada_ratio=round(ratio, 2),
+        severity=severity,
+        severity_color=severity_color,
+        description=description,
+        source=source,
+    )
+
+
+def estimate_time_ada(composite_ada, modality, time_ada_lookup):
+    """Estimate time-to-ADA profile.
+
+    Returns TimeAdaResult with expected onset timing and ADA trajectory.
+    """
+    modality_col = "Protein Modality"
+
+    # Try modality-specific profile
+    by_mod = time_ada_lookup["by_modality"]
+    mod_data = by_mod[by_mod[modality_col] == modality]
+
+    if len(mod_data) >= 2:
+        profile = [(row["time_bin"], row["weighted_ada"], int(row["n_cohorts"]))
+                    for _, row in mod_data.iterrows()]
+        source = "modality-specific"
+    else:
+        global_data = time_ada_lookup["global"]
+        profile = [(row["time_bin"], row["weighted_ada"], int(row["n_cohorts"]))
+                    for _, row in global_data.iterrows()]
+        source = "global"
+
+    if not profile:
+        return None
+
+    # Find peak
+    peak_bin, peak_ada, _ = max(profile, key=lambda x: x[1])
+
+    # Time multiplier: ratio of peak to overall
+    avg_ada = sum(p[1] for p in profile) / len(profile) if profile else 1
+    time_mult = peak_ada / avg_ada if avg_ada > 0 else 1.0
+
+    return TimeAdaResult(
+        expected_onset=peak_bin,
+        peak_ada_pct=round(peak_ada, 1),
+        time_multiplier=round(time_mult, 2),
+        profile=profile,
+    )
 
 
 def predict_ada(
@@ -138,13 +259,16 @@ def predict_ada(
     lookup_tables: dict,
     drug_ada_map: dict,
     alignment_results: list | None = None,
+    expression_system: str | None = None,
+    nada_lookup: dict | None = None,
+    time_ada_lookup: dict | None = None,
 ) -> RiskResult:
     """Compute composite ADA risk score.
 
     Components:
         - Lookup (40%): Historical ADA rates from clinical data
         - Sequence (35%): Nearest-neighbor ADA from sequence alignment
-        - Feature (25%): Adjustments from species/conjugate/route
+        - Feature (25%): Adjustments from species/conjugate/route/expression
     """
     # Lookup component
     lookup_val, lookup_level = _lookup_score(route, disease, modality, lookup_tables)
@@ -155,19 +279,18 @@ def predict_ada(
     )
 
     # Feature adjustment component
-    feature_val, risk_factors = _feature_adjustment(species, conjugate, route, modality)
+    feature_val, risk_factors = _feature_adjustment(
+        species, conjugate, route, modality, expression_system
+    )
 
     # Compute composite
     if seq_val is not None:
-        # All three components
         composite = (
             W_LOOKUP * lookup_val
             + W_SEQUENCE * seq_val
             + W_FEATURE * feature_val
         )
     else:
-        # No sequence: split weight evenly between lookup and features
-        # (features now carry modality signal, so they deserve equal weight)
         composite = (
             0.55 * lookup_val
             + 0.45 * feature_val
@@ -177,6 +300,16 @@ def predict_ada(
     composite = max(0.0, min(100.0, composite))
 
     tier_name, tier_color = get_risk_tier(composite)
+
+    # nADA estimate
+    nada = None
+    if nada_lookup:
+        nada = estimate_nada(composite, modality, route, nada_lookup)
+
+    # Time-to-ADA profile
+    time_ada = None
+    if time_ada_lookup:
+        time_ada = estimate_time_ada(composite, modality, time_ada_lookup)
 
     return RiskResult(
         composite_score=round(composite, 1),
@@ -188,4 +321,6 @@ def predict_ada(
         nearest_drugs=nearest_drugs,
         risk_factors=risk_factors,
         lookup_level=lookup_level,
+        nada=nada,
+        time_ada=time_ada,
     )

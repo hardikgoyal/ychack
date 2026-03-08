@@ -48,7 +48,10 @@ def load_clinical():
     df = pd.read_csv(os.path.join(DATA_DIR, "media-2__in.csv"))
     # Convert key columns to numeric
     for col in ["Prevalence of ADA+ patients", "Number of Patients analyzed for ADA",
-                 "INN_ADA", "N_of_INN_ADA", "cohort_ADA", "PRID_ADA"]:
+                 "INN_ADA", "N_of_INN_ADA", "cohort_ADA", "PRID_ADA",
+                 "Percentage nADA+ patients reported",
+                 "Immunogenicity Assessment Reported Up To (Days)",
+                 "Number of patients with nADAs", "Number of patients analyzed for nADA"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
@@ -146,6 +149,130 @@ def build_drug_ada_map():
             result[name] = float(ada)
 
     return result
+
+
+@st.cache_data
+def build_nada_lookup():
+    """Build neutralizing ADA lookup by modality + route.
+
+    Returns DataFrame with columns: modality, route, nada_pct, nada_ratio, n_cohorts.
+    nada_ratio = median(nADA% / ADA%) for cohorts where both are reported.
+    """
+    therapeutic = load_therapeutic()
+    clinical = load_clinical()
+
+    merged = clinical.merge(
+        therapeutic[["Therapeutic ID", "Protein Modality"]],
+        left_on="Therapeutic Assessed for ADA ID",
+        right_on="Therapeutic ID",
+        how="left",
+    )
+
+    nada_col = "Percentage nADA+ patients reported"
+    ada_col = "Prevalence of ADA+ patients"
+    route_col = "Therapeutic Route of Administration"
+    modality_col = "Protein Modality"
+
+    mask = (
+        (merged["Therapeutic Exposure Status"] == "Therapeutic Exposed")
+        & merged[nada_col].notna()
+        & merged[ada_col].notna()
+        & (merged[ada_col] > 0)
+    )
+    df = merged[mask].copy()
+    df["nada_ratio"] = df[nada_col] / df[ada_col]
+
+    # By modality + route
+    by_mod_route = (
+        df.groupby([modality_col, route_col])
+        .agg(
+            nada_pct=(nada_col, "median"),
+            nada_ratio=("nada_ratio", "median"),
+            n_cohorts=(nada_col, "count"),
+        )
+        .reset_index()
+    )
+
+    # By modality only (fallback)
+    by_mod = (
+        df.groupby([modality_col])
+        .agg(
+            nada_pct=(nada_col, "median"),
+            nada_ratio=("nada_ratio", "median"),
+            n_cohorts=(nada_col, "count"),
+        )
+        .reset_index()
+    )
+
+    # Global
+    global_nada = df[nada_col].median()
+    global_ratio = df["nada_ratio"].median()
+
+    return {
+        "by_mod_route": by_mod_route,
+        "by_mod": by_mod,
+        "global_nada": global_nada,
+        "global_ratio": global_ratio,
+    }
+
+
+@st.cache_data
+def build_time_ada_lookup():
+    """Build time-to-ADA profiles by modality.
+
+    Returns DataFrame showing how ADA rates change over monitoring duration.
+    """
+    therapeutic = load_therapeutic()
+    clinical = load_clinical()
+
+    merged = clinical.merge(
+        therapeutic[["Therapeutic ID", "Protein Modality"]],
+        left_on="Therapeutic Assessed for ADA ID",
+        right_on="Therapeutic ID",
+        how="left",
+    )
+
+    time_col = "Immunogenicity Assessment Reported Up To (Days)"
+    ada_col = "Prevalence of ADA+ patients"
+    n_col = "Number of Patients analyzed for ADA"
+    modality_col = "Protein Modality"
+
+    mask = (
+        (merged["Therapeutic Exposure Status"] == "Therapeutic Exposed")
+        & merged[time_col].notna()
+        & merged[ada_col].notna()
+        & merged[n_col].notna()
+        & (merged[n_col] > 0)
+    )
+    df = merged[mask].copy()
+
+    # Bin time periods
+    bins = [0, 90, 180, 365, 730, 10000]
+    labels = ["< 3 months", "3-6 months", "6-12 months", "1-2 years", "> 2 years"]
+    df["time_bin"] = pd.cut(df[time_col], bins=bins, labels=labels, right=False)
+
+    # Global time profile
+    global_profile = (
+        df.groupby("time_bin", observed=True)
+        .apply(lambda g: pd.Series({
+            "weighted_ada": (g[ada_col] * g[n_col]).sum() / g[n_col].sum() if g[n_col].sum() > 0 else 0,
+            "n_cohorts": len(g),
+            "total_patients": g[n_col].sum(),
+        }), include_groups=False)
+        .reset_index()
+    )
+
+    # By modality
+    mod_profile = (
+        df.groupby([modality_col, "time_bin"], observed=True)
+        .apply(lambda g: pd.Series({
+            "weighted_ada": (g[ada_col] * g[n_col]).sum() / g[n_col].sum() if g[n_col].sum() > 0 else 0,
+            "n_cohorts": len(g),
+        }), include_groups=False)
+        .reset_index()
+    )
+
+    return {"global": global_profile, "by_modality": mod_profile}
 
 
 @st.cache_data

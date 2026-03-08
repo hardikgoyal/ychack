@@ -8,11 +8,13 @@ import os
 from config import (
     MODALITY_OPTIONS, SPECIES_OPTIONS, ROUTE_OPTIONS,
     DISEASE_OPTIONS, CONJUGATE_OPTIONS, BACKBONE_OPTIONS,
+    EXPRESSION_SYSTEM_OPTIONS,
     W_LOOKUP, W_SEQUENCE, W_FEATURE,
 )
 from data_loader import (
     load_therapeutic, load_sequences, load_clinical,
     build_lookup_table, build_drug_ada_map, get_historical_precedents,
+    build_nada_lookup, build_time_ada_lookup,
 )
 from risk_model import predict_ada
 from sequence_engine import (
@@ -47,6 +49,7 @@ route = st.sidebar.selectbox("Route of Administration", ROUTE_OPTIONS)
 disease = st.sidebar.selectbox("Disease Indication", DISEASE_OPTIONS)
 conjugate = st.sidebar.selectbox("Conjugate Modification", CONJUGATE_OPTIONS)
 backbone = st.sidebar.selectbox("Antibody Backbone", BACKBONE_OPTIONS)
+expression_system = st.sidebar.selectbox("Expression System", EXPRESSION_SYSTEM_OPTIONS)
 
 st.sidebar.divider()
 dose = st.sidebar.text_input("Dose Level", placeholder="e.g., 10 mg/kg")
@@ -85,6 +88,8 @@ if not analyze:
 # --- Run Analysis ---
 lookup_tables = build_lookup_table()
 drug_ada_map = build_drug_ada_map()
+nada_lookup = build_nada_lookup()
+time_ada_lookup = build_time_ada_lookup()
 sequences_df = load_sequences()
 
 # Parse multi-chain sequences
@@ -132,6 +137,9 @@ risk_result = predict_ada(
     lookup_tables=lookup_tables,
     drug_ada_map=drug_ada_map,
     alignment_results=best_alignments if best_alignments else None,
+    expression_system=expression_system,
+    nada_lookup=nada_lookup,
+    time_ada_lookup=time_ada_lookup,
 )
 
 # Per-chain sequence diffs
@@ -237,6 +245,48 @@ with tab1:
             for r in best_alignments:
                 ada_str = f" — ADA: {drug_ada_map[r.inn_name]:.1f}%" if r.inn_name in drug_ada_map else ""
                 st.markdown(f"- **{r.inn_name}** ({r.chain_descriptor}): {r.pct_identity:.0%} identity{ada_str}")
+
+    # nADA + Time-to-ADA row
+    st.divider()
+    col_nada, col_time = st.columns(2)
+
+    with col_nada:
+        st.markdown("#### Neutralizing ADA Risk")
+        if risk_result.nada:
+            nada = risk_result.nada
+            st.markdown(
+                f"""<div style="padding:12px; background:{nada.severity_color}22;
+                border-radius:8px; border-left:4px solid {nada.severity_color}">
+                <span style="font-size:1.8rem; font-weight:bold; color:{nada.severity_color}">{nada.nada_pct}%</span>
+                <span style="color:{nada.severity_color}; margin-left:8px">{nada.severity}</span>
+                <br><span style="font-size:0.85rem; color:#666">{nada.description}</span>
+                <br><span style="font-size:0.8rem; color:#999">nADA/ADA ratio: {nada.nada_ratio} | Source: {nada.source}</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("nADA data not available.")
+
+    with col_time:
+        st.markdown("#### ADA Onset Timeline")
+        if risk_result.time_ada:
+            tad = risk_result.time_ada
+            st.markdown(f"**Expected peak:** {tad.expected_onset} (ADA rate: {tad.peak_ada_pct}%)")
+
+            if tad.profile:
+                time_df = pd.DataFrame([
+                    {"Time Window": tb, "ADA Rate (%)": round(ada, 1), "Cohorts": n}
+                    for tb, ada, n in tad.profile
+                ])
+                time_chart = alt.Chart(time_df).mark_bar().encode(
+                    x=alt.X("Time Window:N", sort=None),
+                    y=alt.Y("ADA Rate (%):Q"),
+                    color=alt.value("#4a90d9"),
+                    tooltip=["Time Window", "ADA Rate (%)", "Cohorts"],
+                ).properties(height=200)
+                st.altair_chart(time_chart, use_container_width=True)
+        else:
+            st.info("Time-to-ADA data not available.")
 
     # Historical precedent table
     st.divider()

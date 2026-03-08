@@ -149,6 +149,45 @@ BACKBONE_OPTIONS = [
     "Not Applicable",
 ]
 
+# Expression system baseline ADA rates (%) — from weighted clinical data
+EXPRESSION_SYSTEM_ADA = {
+    "Chinese hamster ovary (CHO) cells": 14.4,
+    "E. coli bacteria": 23.6,
+    "Murine hybridoma": 11.0,
+    "Murine myeloma cells": 10.1,
+    "Pichia pastoris yeast cells": 5.6,
+    "Undetermined": 12.0,
+    "Erwinia chrysanthemi": 23.6,  # Group with E. coli (bacterial)
+}
+
+EXPRESSION_SYSTEM_OPTIONS = [
+    "Chinese hamster ovary (CHO) cells",
+    "Murine myeloma cells",
+    "E. coli bacteria",
+    "Pichia pastoris yeast cells",
+    "Murine hybridoma",
+    "Erwinia chrysanthemi",
+    "Undetermined",
+]
+
+# Time-to-ADA risk multipliers — earlier ADA onset = worse prognosis
+# Based on empirical data: <90d=7.9%, 90-180d=12.9%, 180-365d=16.0%, 365+=14.4%
+TIME_TO_ADA_MULTIPLIER = {
+    "< 3 months": 0.7,     # Early monitoring, low cumulative exposure
+    "3-6 months": 1.1,
+    "6-12 months": 1.3,    # Peak ADA incidence window
+    "1-2 years": 1.2,
+    "> 2 years": 0.8,      # Survivorship bias — tolerized patients remain
+}
+
+# nADA severity tiers
+NADA_SEVERITY = [
+    (10, "Low nADA Risk", "#2ecc71", "Most ADA are non-neutralizing; unlikely to affect efficacy"),
+    (30, "Moderate nADA Risk", "#f39c12", "Meaningful fraction of ADA may be neutralizing"),
+    (60, "High nADA Risk", "#e74c3c", "High probability of neutralizing ADA impacting efficacy"),
+    (100, "Very High nADA Risk", "#8e44ad", "Majority of ADA likely neutralizing; expect efficacy loss"),
+]
+
 # Sequence alignment parameters
 MIN_IDENTITY_THRESHOLD = 0.40  # Below this, sequence match is not used
 KMER_SIZE = 3
