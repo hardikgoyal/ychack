@@ -297,300 +297,223 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
 
+# ── Helpers ──────────────────────────────────────────────────
+def render_results(report, seq_clean, seq_name, pdb_id):
+    """Render all metrics + tabs from a completed AssessmentReport."""
+    risk_class = {
+        "LOW": "risk-low", "MODERATE": "risk-moderate",
+        "HIGH": "risk-high", "VERY HIGH": "risk-very-high"
+    }.get(report.risk_category, "risk-moderate")
+
+    col1, col2, col3, col4 = st.columns(4)
+    strong = len([e for e in report.t_cell_epitopes if e.rank < 10])
+    with col1:
+        st.markdown(f'<div class="metric-card"><div class="metric-value {risk_class}">{report.overall_risk_score:.0%}</div><div class="metric-label">Overall Risk</div></div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#111827;">{report.risk_category}</div><div class="metric-label">Risk Category</div></div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#ea580c;">{strong}</div><div class="metric-label">Strong T-cell Binders</div></div>', unsafe_allow_html=True)
+    with col4:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#0891b2;">{len(report.hotspot_regions)}</div><div class="metric-label">Hotspot Regions</div></div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🧬 3D Heatmap", "🔥 Hotspots", "📊 Residue Plot", "🏥 Clinical Context", "🤖 AI Report"
+    ])
+
+    # ── Tab 1: 3D Heatmap ──
+    with tab1:
+        tamarind_pdb = st.session_state.get(f"tamarind_pdb_{seq_name}")
+        active_pdb = tamarind_pdb or report.pdb_data
+        job_key = f"tamarind_job_{seq_name}"
+        existing_job = st.session_state.get(job_key)
+
+        if active_pdb:
+            source = "Tamarind ESMFold/AlphaFold2" if tamarind_pdb else f"RCSB PDB ({pdb_id})"
+            st.caption(f"Structure source: {source}")
+            html = generate_3d_heatmap_html(active_pdb, report.residue_risks, chain="A",
+                                            title=f"{seq_name} Immunogenicity Heatmap")
+            components.html(html, height=620, scrolling=False)
+        elif existing_job:
+            # ── Polling loop via st.rerun() ──
+            with st.spinner(f"Folding with Tamarind… job: `{existing_job}`"):
+                status = get_tamarind_job_status(TAMARIND_API_KEY, existing_job)
+            if status == "complete":
+                pdb_result = fetch_tamarind_pdb(TAMARIND_API_KEY, existing_job)
+                if pdb_result:
+                    st.session_state[f"tamarind_pdb_{seq_name}"] = pdb_result
+                    del st.session_state[job_key]
+                    st.rerun()
+                else:
+                    st.warning("Job complete but PDB not found — try entering the PDB ID manually in the sidebar.")
+                    del st.session_state[job_key]
+            elif status == "failed":
+                st.error("Tamarind job failed. Try again or enter a PDB ID in the sidebar.")
+                del st.session_state[job_key]
+            else:
+                st.info(f"Still folding… (status: {status}). This page will auto-refresh.")
+                time.sleep(8)
+                st.rerun()
+        else:
+            # ── Text fallback + fold button ──
+            st.markdown("**Per-residue risk (text view):**")
+            risk_html = ""
+            for rr in report.residue_risks:
+                color = "#dc2626" if rr.combined_risk > 0.5 else "#ea580c" if rr.combined_risk > 0.35 else "#ca8a04" if rr.combined_risk > 0.2 else "#2563eb"
+                risk_html += f'<span style="color:{color};font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:500;" title="Pos {rr.position}: {rr.combined_risk:.0%}">{rr.residue}</span>'
+            st.markdown(
+                f'<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;line-height:2;word-wrap:break-word;">'
+                f'<div style="font-size:11px;color:#6b7280;margin-bottom:8px;">'
+                f'<span style="color:#2563eb;">■</span> Low <span style="color:#ca8a04;">■</span> Moderate '
+                f'<span style="color:#ea580c;">■</span> High <span style="color:#dc2626;">■</span> Very High</div>'
+                f'{risk_html}</div>', unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔮 Predict 3D Structure with Tamarind",
+                         help="Submits to ESMFold / AlphaFold2 on Tamarind Bio (uses 1 job)",
+                         use_container_width=True):
+                safe_name = "".join(c if c.isalnum() else "_" for c in (seq_name or "query"))[:30]
+                job_name = f"safebind_{safe_name}_{int(time.time())}"
+                with st.spinner("Submitting to Tamarind Bio…"):
+                    submitted = submit_tamarind_structure(TAMARIND_API_KEY, seq_clean, job_name)
+                if submitted:
+                    st.session_state[job_key] = submitted
+                    st.rerun()  # immediately enter polling loop
+                else:
+                    st.error("Submission failed — check the Tamarind API key or network.")
+
+    # ── Tab 2: Hotspots ──
+    with tab2:
+        if report.hotspot_regions:
+            for i, hs in enumerate(report.hotspot_regions, 1):
+                bar_color = "#dc2626" if hs['avg_risk'] > 0.5 else "#ea580c" if hs['avg_risk'] > 0.35 else "#ca8a04"
+                st.markdown(f"""<div class="hotspot-row">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <span style="font-weight:600;font-size:15px;color:#111827;">Hotspot {i}</span>
+                            <span style="color:#6b7280;font-size:13px;margin-left:8px;">Positions {hs['start']}–{hs['end']} ({hs['length']} residues)</span>
+                        </div>
+                        <div style="font-weight:600;font-size:18px;color:{bar_color};">{hs['avg_risk']:.0%}</div>
+                    </div>
+                    <div class="hotspot-seq" style="margin-top:8px;">{hs['sequence']}</div>
+                    <div style="display:flex;gap:24px;margin-top:8px;font-size:12px;color:#6b7280;">
+                        <span>T-cell: <b style="color:#ea580c;">{hs['avg_t_cell']:.0%}</b></span>
+                        <span>B-cell: <b style="color:#0891b2;">{hs['avg_b_cell']:.0%}</b></span>
+                        <span>Max: <b style="color:#dc2626;">{hs['max_risk']:.0%}</b></span>
+                    </div></div>""", unsafe_allow_html=True)
+        else:
+            st.success("No significant hotspot regions detected above threshold.")
+
+    # ── Tab 3: Residue plot ──
+    with tab3:
+        import pandas as pd
+        df = pd.DataFrame([{
+            "Position": rr.position, "Residue": rr.residue,
+            "T-cell Risk": rr.t_cell_risk, "B-cell Risk": rr.b_cell_risk,
+            "Combined Risk": rr.combined_risk, "Alleles Binding": rr.num_alleles_binding
+        } for rr in report.residue_risks])
+        st.markdown("**Per-residue immunogenicity risk profile**")
+        st.area_chart(df.set_index("Position")[["T-cell Risk", "B-cell Risk", "Combined Risk"]],
+                      color=["#ea580c", "#0891b2", "#dc2626"], height=350)
+        with st.expander("View full residue data table"):
+            st.dataframe(df.style.background_gradient(subset=["Combined Risk"], cmap="YlOrRd"),
+                         use_container_width=True, height=400)
+        st.download_button("📥 Download CSV", df.to_csv(index=False),
+                           file_name=f"{(seq_name or 'query').lower().replace(' ','_')}_risk_scores.csv",
+                           mime="text/csv")
+
+    # ── Tab 4: Clinical context ──
+    with tab4:
+        st.markdown("**Comparable therapeutics from IDC DB V1**")
+        st.caption("3,334 ADA datapoints across 218 therapeutics and 726 clinical trials")
+        if report.comparable_therapeutics:
+            for comp in report.comparable_therapeutics:
+                ada_color = "#dc2626" if comp['median_ada_freq'] > 30 else "#ea580c" if comp['median_ada_freq'] > 10 else "#0891b2"
+                st.markdown(f"""<div class="hotspot-row">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <span style="font-weight:600;font-size:15px;color:#111827;">{comp['name']}</span>
+                            <span style="color:#6b7280;font-size:12px;margin-left:8px;">{comp['species']} · {comp['modality']}</span>
+                        </div>
+                        <div style="font-weight:600;font-size:18px;color:{ada_color};">{comp['median_ada_freq']:.0f}% median ADA</div>
+                    </div>
+                    <div style="display:flex;gap:24px;margin-top:6px;font-size:12px;color:#6b7280;">
+                        <span>Target: <b style="color:#374151;">{comp['target']}</b></span>
+                        <span>Range: {comp['min_ada_freq']:.0f}–{comp['max_ada_freq']:.0f}%</span>
+                        <span>n={comp['n_datapoints']} datapoints</span>
+                    </div></div>""", unsafe_allow_html=True)
+        else:
+            st.info("No comparable therapeutics found in IDC DB V1.")
+        st.markdown("""<div style="margin-top:16px;font-size:12px;color:#6b7280;line-height:1.6;">
+            <b>Key finding from IDC DB V1:</b> Top 3 drivers of clinical ADA frequency are
+            (1) therapeutic immune MOA type, (2) disease indication, and (3) predicted T-cell epitope content.
+        </div>""", unsafe_allow_html=True)
+
+    # ── Tab 5: Claude AI report ──
+    with tab5:
+        api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            st.warning("No Anthropic API key configured.")
+        else:
+            if f"claude_report_{seq_name}" not in st.session_state:
+                with st.spinner("Generating AI risk report with Claude…"):
+                    report_data = {
+                        "name": seq_name, "seq_len": len(seq_clean),
+                        "overall_risk": report.overall_risk_score,
+                        "risk_category": report.risk_category,
+                        "n_strong_binders": strong,
+                        "n_bcell": len(report.b_cell_epitopes),
+                        "hotspots": report.hotspot_regions,
+                        "comparables": report.comparable_therapeutics[:3],
+                    }
+                    st.session_state[f"claude_report_{seq_name}"] = generate_claude_report(report_data)
+            claude_text = st.session_state.get(f"claude_report_{seq_name}", "")
+            if claude_text and not claude_text.startswith("Claude API error"):
+                st.markdown(f'<div class="claude-report"><div class="claude-badge">Generated by Claude · Anthropic</div><div>{claude_text}</div></div>', unsafe_allow_html=True)
+            elif claude_text.startswith("Claude API error"):
+                st.error(claude_text)
+
+    st.markdown("""<div class="disclaimer">
+        FOR RESEARCH AND DEMONSTRATION PURPOSES ONLY. NOT FOR CLINICAL USE.<br>
+        Data: IEDB (tools.iedb.org) · IDC DB V1 (CC BY 4.0, Agnihotri et al. 2025) · RCSB PDB · Claude (Anthropic) · Tamarind Bio
+    </div>""", unsafe_allow_html=True)
+
+
 # ── Main content ─────────────────────────────────────────────
 st.markdown('<div class="hero-title">SafeBind AI</div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-sub">Immunogenicity risk assessment for therapeutic proteins · Powered by IEDB, IDC DB V1, and Claude</div>', unsafe_allow_html=True)
 
 if run_clicked and seq_input:
-    # Clean sequence
     seq_clean = "".join(c for c in seq_input.upper() if c.isalpha())
-
     if len(seq_clean) < 20:
         st.error("Sequence too short. Please enter at least 20 amino acids.")
     else:
-        # Progress tracking
         progress = st.progress(0, text="Initializing analysis...")
-
-        # Step 1: T-cell epitopes
         progress.progress(5, text="Predicting T-cell epitopes across 9 HLA alleles...")
-
         report = run_immunogenicity_assessment(
-            sequence=seq_clean,
-            name=seq_name or "Query",
-            pdb_id=pdb_id if pdb_id else None,
-            pdb_chain="A",
+            sequence=seq_clean, name=seq_name or "Query",
+            pdb_id=pdb_id if pdb_id else None, pdb_chain="A",
             idc_data_path="idc_db_v1_table_s4.xlsx",
-            species=species,
-            modality="Monoclonal antibody",
-            verbose=False,
+            species=species, modality="Monoclonal antibody", verbose=False,
         )
-
-        progress.progress(80, text="Generating visualizations...")
-
-        # ── Risk category color ──
-        risk_class = {
-            "LOW": "risk-low", "MODERATE": "risk-moderate",
-            "HIGH": "risk-high", "VERY HIGH": "risk-very-high"
-        }.get(report.risk_category, "risk-moderate")
-
-        # ── Metrics row ──
-        progress.progress(85, text="Rendering results...")
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown(f"""<div class="metric-card">
-                <div class="metric-value {risk_class}">{report.overall_risk_score:.0%}</div>
-                <div class="metric-label">Overall Risk</div>
-            </div>""", unsafe_allow_html=True)
-        with col2:
-            st.markdown(f"""<div class="metric-card">
-                <div class="metric-value" style="color:#111827;">{report.risk_category}</div>
-                <div class="metric-label">Risk Category</div>
-            </div>""", unsafe_allow_html=True)
-        with col3:
-            strong = len([e for e in report.t_cell_epitopes if e.rank < 10])
-            st.markdown(f"""<div class="metric-card">
-                <div class="metric-value" style="color:#ea580c;">{strong}</div>
-                <div class="metric-label">Strong T-cell Binders</div>
-            </div>""", unsafe_allow_html=True)
-        with col4:
-            st.markdown(f"""<div class="metric-card">
-                <div class="metric-value" style="color:#0891b2;">{len(report.hotspot_regions)}</div>
-                <div class="metric-label">Hotspot Regions</div>
-            </div>""", unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # ── Tabs ──
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "🧬 3D Heatmap", "🔥 Hotspots", "📊 Residue Plot",
-            "🏥 Clinical Context", "🤖 AI Report"
-        ])
-
-        # ── Tab 1: 3D Heatmap ──
-        with tab1:
-            # Prefer: 1) Tamarind-folded PDB in session state, 2) PDB from RCSB (pdb_id), 3) text fallback
-            tamarind_pdb = st.session_state.get(f"tamarind_pdb_{seq_name}", None)
-            active_pdb = tamarind_pdb or report.pdb_data
-
-            if active_pdb:
-                source_label = "Tamarind ESMFold/AlphaFold2" if tamarind_pdb else f"RCSB PDB ({pdb_id})"
-                st.caption(f"Structure source: {source_label}")
-                html = generate_3d_heatmap_html(
-                    active_pdb, report.residue_risks,
-                    chain="A", title=f"{seq_name} Immunogenicity Heatmap"
-                )
-                components.html(html, height=620, scrolling=False)
-            else:
-                # ── Sequence text fallback ──
-                st.markdown("**Per-residue risk (text view):**")
-                risk_html = ""
-                for rr in report.residue_risks:
-                    if rr.combined_risk > 0.5:
-                        color = "#dc2626"
-                    elif rr.combined_risk > 0.35:
-                        color = "#ea580c"
-                    elif rr.combined_risk > 0.2:
-                        color = "#ca8a04"
-                    else:
-                        color = "#2563eb"
-                    risk_html += (
-                        f'<span style="color:{color};font-family:IBM Plex Mono,monospace;'
-                        f'font-size:14px;font-weight:500;" '
-                        f'title="Pos {rr.position}: {rr.combined_risk:.0%}">{rr.residue}</span>'
-                    )
-                st.markdown(
-                    f'<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;'
-                    f'padding:16px;line-height:2;word-wrap:break-word;">'
-                    f'<div style="font-size:11px;color:#6b7280;margin-bottom:8px;">Hover over residues · '
-                    f'<span style="color:#2563eb;">■</span> Low '
-                    f'<span style="color:#ca8a04;">■</span> Moderate '
-                    f'<span style="color:#ea580c;">■</span> High '
-                    f'<span style="color:#dc2626;">■</span> Very High</div>'
-                    f'{risk_html}</div>',
-                    unsafe_allow_html=True,
-                )
-
-                # ── Tamarind fold button ──
-                st.markdown("<br>", unsafe_allow_html=True)
-                tamarind_key = TAMARIND_API_KEY
-                job_key = f"tamarind_job_{seq_name}"
-                existing_job = st.session_state.get(job_key)
-
-                if not tamarind_key:
-                    st.info("💡 Enter your Tamarind API key in the sidebar to predict the 3D structure and unlock the heatmap visualization.")
-                elif existing_job:
-                    # Poll for existing job
-                    with st.spinner(f"Folding structure with Tamarind ({existing_job})…"):
-                        for _ in range(18):  # max ~3 min
-                            status = get_tamarind_job_status(tamarind_key, existing_job)
-                            if status == "complete":
-                                pdb_result = fetch_tamarind_pdb(tamarind_key, existing_job)
-                                if pdb_result:
-                                    st.session_state[f"tamarind_pdb_{seq_name}"] = pdb_result
-                                    del st.session_state[job_key]
-                                    st.success("Structure predicted! Reloading heatmap…")
-                                    time.sleep(1)
-                                    st.rerun()
-                                else:
-                                    st.warning("Job complete but PDB download failed. Try the PDB ID field in the sidebar instead.")
-                                    del st.session_state[job_key]
-                                break
-                            elif status == "failed":
-                                st.error("Tamarind job failed. Check your API key or try a different sequence.")
-                                del st.session_state[job_key]
-                                break
-                            time.sleep(10)
-                        else:
-                            st.info("Still running… click **Analyze Immunogenicity** again to check status.")
-                else:
-                    fold_clicked = st.button(
-                        "🔮 Predict 3D Structure with Tamarind",
-                        help="Submits sequence to ESMFold / AlphaFold2 on Tamarind Bio (uses 1 compute job)",
-                        use_container_width=True,
-                    )
-                    if fold_clicked:
-                        safe_name = "".join(c if c.isalnum() else "_" for c in (seq_name or "query"))[:30]
-                        job_name = f"safebind_{safe_name}_{int(time.time())}"
-                        with st.spinner("Submitting to Tamarind Bio…"):
-                            submitted = submit_tamarind_structure(tamarind_key, seq_clean, job_name)
-                        if submitted:
-                            st.session_state[job_key] = submitted
-                            st.success(f"Job submitted: `{submitted}`. Click **Analyze Immunogenicity** to check progress.")
-                        else:
-                            st.error("Submission failed. Check your Tamarind API key.")
-
-        # ── Tab 2: Hotspot details ──
-        with tab2:
-            if report.hotspot_regions:
-                for i, hs in enumerate(report.hotspot_regions, 1):
-                    risk_pct = hs['avg_risk']
-                    bar_color = "#dc2626" if risk_pct > 0.5 else "#ea580c" if risk_pct > 0.35 else "#ca8a04"
-
-                    st.markdown(f"""<div class="hotspot-row">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <div>
-                                <span style="font-weight:600;font-size:15px;color:#111827;">Hotspot {i}</span>
-                                <span style="color:#6b7280;font-size:13px;margin-left:8px;">Positions {hs['start']}–{hs['end']} ({hs['length']} residues)</span>
-                            </div>
-                            <div style="font-weight:600;font-size:18px;color:{bar_color};">{hs['avg_risk']:.0%}</div>
-                        </div>
-                        <div class="hotspot-seq" style="margin-top:8px;">{hs['sequence']}</div>
-                        <div style="display:flex;gap:24px;margin-top:8px;font-size:12px;color:#6b7280;">
-                            <span>T-cell risk: <b style="color:#ea580c;">{hs['avg_t_cell']:.0%}</b></span>
-                            <span>B-cell risk: <b style="color:#0891b2;">{hs['avg_b_cell']:.0%}</b></span>
-                            <span>Max risk: <b style="color:#dc2626;">{hs['max_risk']:.0%}</b></span>
-                        </div>
-                    </div>""", unsafe_allow_html=True)
-            else:
-                st.success("No significant hotspot regions detected above threshold.")
-
-        # ── Tab 3: Residue-level plot ──
-        with tab3:
-            import pandas as pd
-            df = pd.DataFrame([{
-                "Position": rr.position,
-                "Residue": rr.residue,
-                "T-cell Risk": rr.t_cell_risk,
-                "B-cell Risk": rr.b_cell_risk,
-                "Combined Risk": rr.combined_risk,
-                "Alleles Binding": rr.num_alleles_binding
-            } for rr in report.residue_risks])
-
-            st.markdown("**Per-residue immunogenicity risk profile**")
-
-            # Use streamlit's built-in chart
-            chart_df = df.set_index("Position")[["T-cell Risk", "B-cell Risk", "Combined Risk"]]
-            st.area_chart(chart_df, color=["#ea580c", "#0891b2", "#dc2626"], height=350)
-
-            # Data table
-            with st.expander("View full residue data table"):
-                st.dataframe(
-                    df.style.background_gradient(subset=["Combined Risk"], cmap="YlOrRd"),
-                    use_container_width=True,
-                    height=400,
-                )
-
-            # CSV download
-            csv_data = df.to_csv(index=False)
-            st.download_button(
-                "📥 Download CSV",
-                csv_data,
-                file_name=f"{seq_name.lower().replace(' ','_')}_risk_scores.csv",
-                mime="text/csv"
-            )
-
-        # ── Tab 4: Clinical context (IDC DB V1) ──
-        with tab4:
-            st.markdown("**Comparable therapeutics from IDC DB V1**")
-            st.caption("4,146 ADA datapoints across 218 therapeutics and 727 clinical trials")
-
-            if report.comparable_therapeutics:
-                for comp in report.comparable_therapeutics:
-                    ada_color = "#dc2626" if comp['median_ada_freq'] > 30 else "#ea580c" if comp['median_ada_freq'] > 10 else "#0891b2"
-                    st.markdown(f"""<div class="hotspot-row">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <div>
-                                <span style="font-weight:600;font-size:15px;color:#111827;">{comp['name']}</span>
-                                <span style="color:#6b7280;font-size:12px;margin-left:8px;">{comp['species']} · {comp['modality']}</span>
-                            </div>
-                            <div style="font-weight:600;font-size:18px;color:{ada_color};">{comp['median_ada_freq']:.0f}% median ADA</div>
-                        </div>
-                        <div style="display:flex;gap:24px;margin-top:6px;font-size:12px;color:#6b7280;">
-                            <span>Target: <b style="color:#374151;">{comp['target']}</b></span>
-                            <span>Range: {comp['min_ada_freq']:.0f}–{comp['max_ada_freq']:.0f}%</span>
-                            <span>n={comp['n_datapoints']} datapoints</span>
-                        </div>
-                    </div>""", unsafe_allow_html=True)
-            else:
-                st.info("No comparable therapeutics found in IDC DB V1.")
-
-            st.markdown("""<div style="margin-top:16px;font-size:12px;color:#6b7280;line-height:1.6;">
-                <b>Key finding from IDC DB V1 multivariate analysis:</b> The top 3 drivers of clinical ADA frequency are
-                (1) therapeutic immune MOA type, (2) disease indication, and (3) predicted T-cell epitope content.
-                Sequence-level predictions should always be interpreted in clinical context.
-            </div>""", unsafe_allow_html=True)
-
-        # ── Tab 5: Claude AI report ──
-        with tab5:
-            api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
-
-            if not api_key:
-                st.warning("No Anthropic API key configured.")
-            else:
-                progress.progress(90, text="Generating AI risk report with Claude...")
-
-                report_data = {
-                    "name": seq_name,
-                    "seq_len": len(seq_clean),
-                    "overall_risk": report.overall_risk_score,
-                    "risk_category": report.risk_category,
-                    "n_strong_binders": len([e for e in report.t_cell_epitopes if e.rank < 10]),
-                    "n_bcell": len(report.b_cell_epitopes),
-                    "hotspots": report.hotspot_regions,
-                    "comparables": report.comparable_therapeutics[:3],
-                }
-
-                claude_text = generate_claude_report(report_data)
-
-                if claude_text and not claude_text.startswith("Claude API error"):
-                    st.markdown(f"""<div class="claude-report">
-                        <div class="claude-badge">Generated by Claude · Anthropic</div>
-                        <div>{claude_text}</div>
-                    </div>""", unsafe_allow_html=True)
-                elif claude_text.startswith("Claude API error"):
-                    st.error(claude_text)
-
+        progress.progress(95, text="Rendering results...")
+        # Persist to session state so Tamarind button reruns don't lose the report
+        st.session_state["report"] = report
+        st.session_state["seq_clean"] = seq_clean
+        st.session_state["seq_name"] = seq_name
+        st.session_state["pdb_id"] = pdb_id
+        # Clear any cached Claude report when re-analyzing
+        st.session_state.pop(f"claude_report_{seq_name}", None)
         progress.progress(100, text="Analysis complete!")
-        time.sleep(0.5)
+        time.sleep(0.3)
         progress.empty()
 
-        # ── Disclaimer ──
-        st.markdown("""<div class="disclaimer">
-            FOR RESEARCH AND DEMONSTRATION PURPOSES ONLY. NOT FOR CLINICAL USE.<br>
-            This tool is not FDA-cleared. Treatment decisions should be made by qualified healthcare professionals.<br>
-            Data: IEDB (tools.iedb.org) · IDC DB V1 (CC BY 4.0, Agnihotri et al. 2025) · RCSB PDB · Claude (Anthropic)
-        </div>""", unsafe_allow_html=True)
+if "report" in st.session_state:
+    render_results(
+        st.session_state["report"],
+        st.session_state["seq_clean"],
+        st.session_state["seq_name"],
+        st.session_state.get("pdb_id", ""),
+    )
 
 elif not run_clicked:
     # Landing state
