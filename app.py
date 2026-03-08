@@ -31,6 +31,8 @@ from immunogenicity_core_2 import (
     fetch_tamarind_pdb,
 )
 
+TAMARIND_API_KEY = "ca6b27d3-b2b7-486e-81b9-774f47e8c37f"
+
 # ── Page config ──────────────────────────────────────────────
 st.set_page_config(
     page_title="SafeBind AI",
@@ -275,18 +277,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Tamarind API key
-    tamarind_key_input = st.text_input(
-        "Tamarind API key (for 3D folding)",
-        type="password",
-        placeholder="tmrd-...",
-        help="Get your key at app.tamarind.bio — used for ESMFold / AlphaFold2 structure prediction"
-    )
-    if tamarind_key_input:
-        st.session_state["tamarind_api_key"] = tamarind_key_input
-
-    st.markdown("---")
-
     # Run button
     run_clicked = st.button("🔬 Analyze Immunogenicity", type="primary", use_container_width=True)
 
@@ -296,8 +286,7 @@ with st.sidebar:
     <b style="color:#374151;">Data sources</b><br>
     IEDB (tools.iedb.org)<br>
     IDC DB V1 (CC BY 4.0)<br>
-    RCSB PDB<br>
-    Tamarind Bio (ESMFold/AF2)<br><br>
+    RCSB PDB · Tamarind Bio<br><br>
     <b style="color:#374151;">HLA coverage</b><br>
     9 DRB1 alleles (~85% global)
     </div>
@@ -420,7 +409,7 @@ if run_clicked and seq_input:
 
                 # ── Tamarind fold button ──
                 st.markdown("<br>", unsafe_allow_html=True)
-                tamarind_key = st.session_state.get("tamarind_api_key", "")
+                tamarind_key = TAMARIND_API_KEY
                 job_key = f"tamarind_job_{seq_name}"
                 existing_job = st.session_state.get(job_key)
 
