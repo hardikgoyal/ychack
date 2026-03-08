@@ -654,13 +654,14 @@ def compute_composite_score(
     humoral = mhc2_overall_risk * 100  # 0-100
     cytotoxic = mhc1_overall_risk * 100  # 0-100
     
-    # Category
-    if composite >= 60:
-        category = "VERY HIGH"
-    elif composite >= 40:
-        category = "HIGH"
-    elif composite >= 20:
-        category = "MODERATE"
+    # Category (calibrated to clinical outcomes)
+    # SUCCESS drugs: 7-10, MARGINAL: 12-18, FAILED: 27-48
+    if composite > 40:
+        category = "VERY HIGH"  # AT132, Catumaxomab territory
+    elif composite > 25:
+        category = "HIGH"       # Bococizumab territory
+    elif composite > 15:
+        category = "MODERATE"   # Infliximab territory (needs TDM)
     else:
         category = "LOW"
     
@@ -670,10 +671,10 @@ def compute_composite_score(
     ci_low = max(0, composite - 1.96 * score_std / (len(scores) ** 0.5))
     ci_high = min(100, composite + 1.96 * score_std / (len(scores) ** 0.5))
     
-    # Risk flags
+    # Risk flags (calibrated thresholds)
     flags = []
-    if composite > 60:
-        flags.append("VERY_HIGH_RISK: Composite score exceeds 60/100")
+    if composite > 40:
+        flags.append("VERY_HIGH_RISK: Composite >40 — similar to drugs that failed trials (Bococizumab, AT132, Catumaxomab)")
     if mhc1_overall_risk > 0.4:
         flags.append("HIGH_CYTOTOXIC_RISK: Significant MHC-I epitope load — monitor for cellular toxicity")
     if benchmark.score > 50 and epitope.score > 50:

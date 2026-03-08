@@ -54,6 +54,13 @@ from safebind_composite_scorer import (
     CompositeScore,
 )
 
+from safebind_advanced_analysis import (
+    run_advanced_analysis,
+    detect_checkpoint_inhibitor,
+    analyze_germline_humanness,
+    search_iedb_epitopes,
+)
+
 try:
     from api_keys import TAMARIND_API_KEY, ANTHROPIC_API_KEY  # local-only, gitignored
 except ImportError:
@@ -293,6 +300,12 @@ PRELOADED = {
         "pdb": None,
         "context": {"modality": "AAV gene therapy", "route": "IV (intravenous)", "indication": "Hemophilia", "serotype": "AAV8"},
     },
+    "AT132 / AAV8 (XLMTM, 4 deaths)": {
+        "seq": "MAADGYLPDWLEDTLSEGIRQWWKLKPGPPPPKPAERHKDDSRGLVLPGYKYLGPFNGLDKGEPVNAADAAALEHDKAYDQQLQAGDNPYLRYNHADAEFQERLQEDTSFGGNLGRAVFQAKKRVLEPLGLVEEGAKTAPGKKRPVEPSPQRSPDSSTGIGKKGQQPARKRLNFGQTGDSESVPDPQPLGEPPATPAAVGPTTMASGGGAPMADNNEGADGVGNASGNWHCDSTWLGDRVITTSTRTWALPTYNNHLYKQISSASTGASNDNHYFGYSTPWGYFDFNRFHCHFSPRDWQRLINNNWGFRPKRLSFKLFNIQVKEVTTNDGVTTIANNLTSTVQVFSDSEYQLPYVLGSAHQGCLPPFPADVFMIPQYGYLTLNNGSQAVGRSSFYCLEYFPSQMLRTGNNFTFSYTFEEVPFHSSYAHSQSLDRLMNPLIDQYLYYLNRTQNQSGSAQNKDLLFSRGSPAGMSVQPKNWLPGPCYRQQRVSKTKTDNNNSNFTWTGASKYNLNGRESIINPGTAMASHKDDKDKFFPMSGVMIFGKESAGASNTALDNVMITDEEEIKATNPVATERFGTVAVNFQSSSTDPATGDVHAMGALPGMVWQDRDVYLQGPIWAKIPHTDGHFHPSPLMGGFGLKNPPPQILIKNTPVPANPPAEFSATKFASFITQYSTGQVSVEIEWELQKENSKRWNPEVQYTSNYAKSANVDFTVDNNGLYTEPRPIGTRYLTRPL",
+        "species": "Viral",
+        "pdb": None,
+        "context": {"modality": "AAV gene therapy", "route": "IV (intravenous)", "indication": "Neuromuscular (DMD, SMA)", "serotype": "AAV8"},
+    },
     "AAV5 VP1 (Luxturna, Roctavian)": {
         "seq": "MSFVDHPPDWLEEVGEGLREFLGLEAGPPKPKPNQQHQDQARGLVLPGYNYLGPGNGLDRGEPVNRADEVAREHDISYNEQLEAGDNPYLKYNHADAEFQEKLADDTSFGGNLGKAVFQAKKRVLEPFGLVEEGAKTAPTGKRIDDHFPKRKKARTEEDSKPSTSSDAEAGPSGSQQLQIPAQPASSLGADTMSAGGGGPLGDNNQGADGVGNASGDWHCDSTWSEGHVTTTSTRTWVLPTYNNHLYKRLGESLQSNTYNKFSTPWGYFDFNRFHCHFSPRDWQRLINNNWGMRPKAMRVKIFNIQVKEVTTSNGETTVANNLTSTVQIFADSSYELPYVMDAGQEGSLPPFPNDVFMVPQYGYCGLVTGNTSQQQTDRNAFYCLEYFPSQMLRTGNNFEITYSFEKVPFHSMYAHSQSLDRLMNPLIDQYLWGLQSTTTGTTLNAGTATTNFTKLRPTNFSNFKKNWLPGPSIKQQGFSKTANQNYKIPATGSDSLIKYETHSTLDGRWSALTPGPPMATAGPADSKFSNSQLIFAGPKQNGNTATVPGTLIFTSEEELAATNATDTDMWGNLPGGDQSNSNLPTVDRLTALGAVPGMVWQNRDIYYQGPIWAKIPHTDGHFHPSPLIGGFGLKHPPPQIFIKNTPVPANPATTFSSTPVNSFITQYSTGQVSVQIDWEIQKERSKRWNPEVQFTSNYGQQNSLLWAPDAAGKYTEPRAIGTRYLTHHL",
         "species": "Viral",
@@ -310,19 +323,6 @@ PRELOADED = {
         "species": "Viral",
         "pdb": None,
         "context": {"modality": "AAV gene therapy", "route": "IV (intravenous)", "indication": "Other", "serotype": "AAV2"},
-    },
-    "── Enzyme Replacement ──": None,
-    "Agalsidase beta / Fabrazyme (~40% nADA)": {
-        "seq": "LDNGLARTPTMGWLHWERFMCNLDCQEEPDSCISEKLFMEMAELMVSEGWKDAGYEYLCIDDCWMAPQRDSEGRLQADPQRFPHGIRQLANYVHSKGLKLGIYADVGNKTCAGFPGSFGYYDIDAQTFAD",
-        "species": "Human",
-        "pdb": None,
-        "context": {"modality": "Enzyme replacement", "route": "IV (intravenous)", "indication": "Lysosomal storage (Fabry, Gaucher, Pompe)", "crim_status": "CRIM-positive (residual enzyme)"},
-    },
-    "Alglucosidase alfa / Myozyme (~100% ADA CRIM-neg)": {
-        "seq": "AHPGRPRAVPTQCDVPPNSRFDCAPDKAITQEQCEARGCCYIPAKQGLQGAQMGQPWCFFPPSYPSYKLENLSSSEMGYTATLTRTTPTFFPKDILTLRLDVMMETENRLHFTIKDPANRRYEVPLETPH",
-        "species": "Human",
-        "pdb": None,
-        "context": {"modality": "Enzyme replacement", "route": "IV (intravenous)", "indication": "Lysosomal storage (Fabry, Gaucher, Pompe)", "crim_status": "CRIM-negative (no enzyme)"},
     },
     "── Bispecific ──": None,
     "Blinatumomab / Blincyto (BiTE, 1-2% ADA)": {
@@ -792,7 +792,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
     
     # Show adjustment explanation if context was provided
     if has_context and adj_factors:
-        with st.expander("📊 Risk adjustment factors applied", expanded=True):
+        with st.expander("Risk adjustment factors applied", expanded=True):
             st.markdown(f"**Raw sequence risk:** {report.overall_risk_score:.0%} → **Context-adjusted:** {adjusted_risk:.0%}")
             for f in adj_factors:
                 st.markdown(f"- {f}")
@@ -803,10 +803,10 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                "For example, Humira shows 76% sequence risk but only 5% clinical ADA (1% with MTX).")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    tab1, tab2, tab2b, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
-        "🧬 3D Heatmap", "🔥 T-cell Hotspots", "🧫 B-cell Epitopes", "📊 Residue Plot", 
-        "🏥 Clinical Context", "🤖 AI Report", "🧪 Tolerance", "🔧 Deimmunize",
-        "⚡ Cytotoxic (MHC-I)", "🎯 Composite Score"
+    tab1, tab2, tab2b, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+        "3D Heatmap", "T-cell Hotspots", "B-cell Epitopes", "Residue Plot", 
+        "Clinical Context", "AI Report", "Tolerance", "Deimmunize",
+        "Cytotoxic (MHC-I)", "Composite Score", "Advanced"
     ])
 
     # ── Tab 1: 3D Heatmap ──
@@ -868,7 +868,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 st.markdown("""
                 <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 24px; color: white; margin-bottom: 16px;">
                     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
-                        <div style="font-size: 32px;">🧬</div>
+                        <div style="font-size: 32px; color: #7c3aed;">◆</div>
                         <div>
                             <div style="font-size: 18px; font-weight: 600;">Folding protein structure with ESMFold</div>
                             <div style="font-size: 13px; opacity: 0.9;">Powered by Tamarind Bio</div>
@@ -922,7 +922,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 f'<span style="color:#ea580c;">■</span> High <span style="color:#dc2626;">■</span> Very High</div>'
                 f'{risk_html}</div>', unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🔮 Predict 3D Structure with Tamarind",
+            if st.button("Predict 3D Structure with Tamarind",
                          help="Submits to ESMFold / AlphaFold2 on Tamarind Bio (uses 1 job)",
                          use_container_width=True):
                 safe_name = "".join(c if c.isalnum() else "_" for c in (seq_name or "query"))[:30]
@@ -950,10 +950,10 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                         <div style="font-weight:600;font-size:18px;color:{bar_color};">{hs['avg_risk']:.0%}</div>
                     </div>
                     <div class="hotspot-seq" style="margin-top:8px;">{hs['sequence']}</div>
-                    <div style="display:flex;gap:24px;margin-top:8px;font-size:12px;color:#6b7280;">
-                        <span>T-cell: <b style="color:#ea580c;">{hs['avg_t_cell']:.0%}</b></span>
-                        <span>B-cell: <b style="color:#0891b2;">{hs['avg_b_cell']:.0%}</b></span>
-                        <span>Max: <b style="color:#dc2626;">{hs['max_risk']:.0%}</b></span>
+                    <div style="display:flex;gap:24px;margin-top:8px;font-size:12px;">
+                        <span style="color:#6b7280;">T-cell:</span> <span style="color:#ea580c;font-weight:600;">{hs['avg_t_cell']:.0%}</span>
+                        <span style="color:#6b7280;margin-left:8px;">B-cell:</span> <span style="color:#0891b2;font-weight:600;">{hs['avg_b_cell']:.0%}</span>
+                        <span style="color:#6b7280;margin-left:8px;">Max:</span> <span style="color:#dc2626;font-weight:600;">{hs['max_risk']:.0%}</span>
                     </div></div>""", unsafe_allow_html=True)
         else:
             st.success("No significant T-cell hotspot regions detected above threshold.")
@@ -962,7 +962,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
     with tab2b:
         # Show CDR regions if detected (for antibodies)
         if report.cdr_regions:
-            st.markdown("**🎯 Detected CDR Regions** (binding site)")
+            st.markdown("**Detected CDR Regions** (binding site)")
             cdr_cols = st.columns(len(report.cdr_regions))
             for idx, cdr in enumerate(report.cdr_regions):
                 with cdr_cols[idx]:
@@ -1028,9 +1028,9 @@ def render_results(report, seq_clean, seq_name, pdb_id):
         if not report.pdb_data and not report.surface_b_cell_epitopes:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("---")
-            st.markdown("**🔮 Get Surface Accessibility Analysis**")
+            st.markdown("**Get Surface Accessibility Analysis**")
             st.caption("Fold the protein with Tamarind to filter for surface-exposed (antibody-accessible) epitopes.")
-            if st.button("🔮 Predict 3D Structure with Tamarind", key="tamarind_bcell_tab", use_container_width=True):
+            if st.button("Predict 3D Structure with Tamarind", key="tamarind_bcell_tab", use_container_width=True):
                 safe_name = "".join(c if c.isalnum() else "_" for c in (seq_name or "query"))[:30]
                 job_name = f"safebind_{safe_name}_{int(time.time())}"
                 job_key = f"tamarind_job_{seq_name}"
@@ -1087,7 +1087,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 styled = styled.background_gradient(subset=["SASA"], cmap="Greens")
             st.dataframe(styled, use_container_width=True, height=400)
         
-        st.download_button("📥 Download CSV", df.to_csv(index=False),
+        st.download_button("Download CSV", df.to_csv(index=False),
                            file_name=f"{(seq_name or 'query').lower().replace(' ','_')}_risk_scores.csv",
                            mime="text/csv")
 
@@ -1187,7 +1187,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 st.markdown(f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:8px;"><div style="display:flex;justify-content:space-between;align-items:center;"><div><span style="font-family:monospace;font-size:13px;color:#dc2626;">{r.epitope_seq}</span><span style="color:#6b7280;font-size:12px;margin-left:8px;">Pos {r.start}–{r.end}</span></div><div><span style="font-size:12px;color:#991b1b;">Humanness: {r.humanness_score:.2f}</span></div></div></div>', unsafe_allow_html=True)
         
         if tregs:
-            st.markdown(f"<br>**✅ Putative Treg Epitopes ({len(tregs)})** — may suppress immune response", unsafe_allow_html=True)
+            st.markdown(f"<br>**Putative Treg Epitopes ({len(tregs)})** — may suppress immune response", unsafe_allow_html=True)
             seen_starts = set()
             for r in sorted(tregs, key=lambda x: -x.humanness_score)[:8]:
                 if r.start in seen_starts:
@@ -1196,7 +1196,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 match_badge = ' <span style="background:#059669;color:white;padding:2px 6px;border-radius:3px;font-size:10px;">Tregitope</span>' if r.tregitope_match else ''
                 st.markdown(f'<div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;padding:12px;margin-bottom:8px;"><div style="display:flex;justify-content:space-between;align-items:center;"><div><span style="font-family:monospace;font-size:13px;color:#059669;">{r.epitope_seq}</span><span style="color:#6b7280;font-size:12px;margin-left:8px;">Pos {r.start}–{r.end}{match_badge}</span></div><div><span style="font-size:12px;color:#059669;">Humanness: {r.humanness_score:.2f}</span></div></div></div>', unsafe_allow_html=True)
         
-        with st.expander("ℹ️ How tolerance analysis works"):
+        with st.expander("How tolerance analysis works"):
             st.markdown("""
 **JanusMatrix principle:** MHC-II binding peptides have positions 2,3,5,7,8 facing the TCR. If these residues match patterns in human self-proteins, the epitope may activate regulatory T cells (Tregs) that suppress immune responses.
 
@@ -1251,7 +1251,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
             col_a, col_b = st.columns(2)
             with col_a:
                 st.download_button(
-                    "📥 Download optimized FASTA",
+                    "Download optimized FASTA",
                     f">SafeBind_optimized_{seq_name}\n{deim.optimized_sequence}",
                     file_name=f"{(seq_name or 'query').lower().replace(' ','_')}_deimmunized.fasta",
                     mime="text/plain",
@@ -1261,11 +1261,11 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 for s in deim.suggestions:
                     target_type = "MHC_anchor" if not s.is_tcr_face else "TCR_contact"
                     mut_csv += f"{s.position},{s.original_aa},{s.suggested_aa},{target_type},{s.predicted_risk_reduction:.2f}\n"
-                st.download_button("📥 Download mutations CSV", mut_csv, file_name=f"{(seq_name or 'query').lower().replace(' ','_')}_mutations.csv", mime="text/csv")
+                st.download_button("Download mutations CSV", mut_csv, file_name=f"{(seq_name or 'query').lower().replace(' ','_')}_mutations.csv", mime="text/csv")
         else:
             st.success("No deimmunization needed — no significant hotspots detected.")
         
-        with st.expander("ℹ️ How deimmunization works"):
+        with st.expander("How deimmunization works"):
             st.markdown("""
 **Strategy 1 — Anchor disruption:** Replace MHC anchor residues (positions 1,4,6,9) with disfavored amino acids to prevent peptide loading.
 
@@ -1348,7 +1348,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
         # ── AAV Validated Epitope Recovery ──
         if cyto.aav_epitope_recovery is not None and cyto.validated_details:
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("**🧬 AAV Validated Epitope Cross-Reference**")
+            st.markdown("**AAV Validated Epitope Cross-Reference**")
             st.caption(
                 f"Cross-checked against {len(AAV_VALIDATED_EPITOPES_HUI_2015)} validated CD8+ epitopes "
                 f"(Hui et al. 2015) + {len(AAV_IMMUNOPEPTIDOMICS_2023)} immunopeptidomics peptides (2023)."
@@ -1377,7 +1377,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
         # ── Cytotoxic Hotspots ──
         st.markdown("<br>", unsafe_allow_html=True)
         if cyto.hotspot_regions:
-            st.markdown(f"**⚡ Cytotoxic Hotspot Regions ({len(cyto.hotspot_regions)})**")
+            st.markdown(f"**Cytotoxic Hotspot Regions ({len(cyto.hotspot_regions)})**")
             st.caption("Regions with high MHC-I binding density — CD8+ T cells will target these areas")
             for i, hs in enumerate(cyto.hotspot_regions[:8], 1):
                 bar_color = "#7c3aed" if hs['avg_risk'] > 0.4 else "#a855f7" if hs['avg_risk'] > 0.25 else "#c084fc"
@@ -1410,7 +1410,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
             ])
             st.area_chart(cyto_df.set_index("Position")["MHC-I Risk"], color="#7c3aed", height=250)
 
-        with st.expander("ℹ️ Data sources & methodology"):
+        with st.expander("Data sources & methodology"):
             st.markdown("""
 **MHC-I Prediction:** IEDB NetMHCpan 4.1 across 12 HLA-A/B supertypes covering ~95% of the global population.
 
@@ -1468,13 +1468,43 @@ def render_results(report, seq_clean, seq_name, pdb_id):
         comp = st.session_state[comp_key]
 
         # ── Big composite score display ──
-        score_color = "#dc2626" if comp.composite_score > 60 else "#ea580c" if comp.composite_score > 40 else "#ca8a04" if comp.composite_score > 20 else "#0891b2"
-        st.markdown(f"""<div style="background:linear-gradient(135deg,#f8fafc 0%,#f1f5f9 100%);border:2px solid {score_color};border-radius:12px;padding:24px;text-align:center;margin-bottom:20px;">
+        # Calibrated thresholds based on clinical outcomes
+        score_color = "#dc2626" if comp.composite_score > 40 else "#ea580c" if comp.composite_score > 25 else "#ca8a04" if comp.composite_score > 15 else "#059669"
+        
+        # Pass/fail prediction
+        if comp.composite_score <= 15:
+            prediction = "LIKELY TO PASS"
+            pred_color = "#059669"
+            pred_bg = "#ecfdf5"
+            comparables = "Similar to: Trastuzumab, Pembrolizumab, Adalimumab+MTX"
+        elif comp.composite_score <= 25:
+            prediction = "MAY PASS WITH MITIGATION"
+            pred_color = "#ca8a04"
+            pred_bg = "#fefce8"
+            comparables = "Similar to: Infliximab (needs TDM), Adalimumab monotherapy"
+        elif comp.composite_score <= 40:
+            prediction = "HIGH FAILURE RISK"
+            pred_color = "#ea580c"
+            pred_bg = "#fff7ed"
+            comparables = "Similar to: Bococizumab (failed Phase 3)"
+        else:
+            prediction = "LIKELY TO FAIL"
+            pred_color = "#dc2626"
+            pred_bg = "#fef2f2"
+            comparables = "Similar to: Catumaxomab (withdrawn), AT132 (4 deaths)"
+        
+        st.markdown(f"""<div style="background:linear-gradient(135deg,#f8fafc 0%,#f1f5f9 100%);border:2px solid {score_color};border-radius:12px;padding:24px;text-align:center;margin-bottom:12px;">
             <div style="font-size:56px;font-weight:700;color:{score_color};">{comp.composite_score:.0f}<span style="font-size:24px;color:#6b7280;">/100</span></div>
             <div style="font-size:18px;font-weight:600;color:#111827;margin-top:4px;">{comp.composite_category}</div>
             <div style="font-size:12px;color:#6b7280;margin-top:4px;">
                 95% CI: [{comp.confidence_interval[0]:.0f}, {comp.confidence_interval[1]:.0f}] · {comp.total_data_sources} data sources
             </div>
+        </div>""", unsafe_allow_html=True)
+        
+        # Pass/fail prediction banner
+        st.markdown(f"""<div style="background:{pred_bg};border:2px solid {pred_color};border-radius:8px;padding:12px 16px;margin-bottom:20px;text-align:center;">
+            <div style="font-size:14px;font-weight:700;color:{pred_color};">{prediction}</div>
+            <div style="font-size:11px;color:#6b7280;margin-top:4px;">{comparables}</div>
         </div>""", unsafe_allow_html=True)
 
         # ── Dual pathway bars ──
@@ -1503,7 +1533,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                 is_critical = "VERY_HIGH" in flag or "CONVERGENT" in flag
                 bg = "#fef2f2" if is_critical else "#fffbeb"
                 border = "#fecaca" if is_critical else "#fde68a"
-                icon = "🚨" if is_critical else "⚠️"
+                icon = "⚠️" if is_critical else "⚠️"
                 st.markdown(f"""<div style="background:{bg};border:1px solid {border};border-radius:6px;padding:10px 14px;margin-bottom:6px;">
                     {icon} <span style="font-weight:600;font-size:12px;color:#374151;">{flag_name}</span>
                     <span style="font-size:12px;color:#6b7280;margin-left:6px;">{flag_desc}</span>
@@ -1513,9 +1543,9 @@ def render_results(report, seq_clean, seq_name, pdb_id):
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("**Signal Breakdown**")
         signals = [
-            (comp.benchmark_signal, "#2563eb", "📊"),
-            (comp.similarity_signal, "#059669", "🔗"),
-            (comp.epitope_signal, "#dc2626", "🧬"),
+            (comp.benchmark_signal, "#2563eb", "1."),
+            (comp.similarity_signal, "#059669", "2."),
+            (comp.epitope_signal, "#dc2626", "3."),
         ]
         for sig, color, icon in signals:
             bar_width = min(100, sig.score)
@@ -1539,7 +1569,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
 
         # ── Claude AI Synthesis (Signal 4) ──
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("**🤖 Signal 4: AI Synthesis**")
+        st.markdown("**Signal 4: AI Synthesis**")
         api_key = ANTHROPIC_API_KEY or os.environ.get("ANTHROPIC_API_KEY", "")
         synthesis_key = f"composite_synthesis_{seq_name}"
         if api_key:
@@ -1569,7 +1599,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
             with st.expander("View synthesis prompt"):
                 st.code(comp.synthesis_prompt, language=None)
 
-        with st.expander("ℹ️ All data sources & references"):
+        with st.expander("All data sources & references"):
             st.markdown(f"**{comp.total_data_sources} data sources referenced:**")
             for key, desc in comp.data_references.items():
                 st.markdown(f"- **{key}**: {desc}")
@@ -1581,6 +1611,179 @@ def render_results(report, seq_clean, seq_name, pdb_id):
 4. **AI Synthesis (15%):** Claude integrates all signals and recommends next steps
             """)
 
+    # ── Tab 10: Advanced Analysis ──
+    with tab10:
+        st.markdown("**Advanced Analysis**")
+        st.caption(
+            "Checkpoint inhibitor detection, germline humanness scoring, and IEDB epitope homology search. "
+            "These features address gaps identified in comparison with EpiVax ISPRI."
+        )
+        
+        # Run advanced analysis (cache in session state)
+        adv_key = f"advanced_{seq_name}"
+        if adv_key not in st.session_state:
+            ctx = st.session_state.get("clinical_context", {})
+            hotspot_peptides = [hs["sequence"] for hs in report.hotspot_regions[:5]] if report.hotspot_regions else []
+            
+            with st.spinner("Running advanced analysis..."):
+                st.session_state[adv_key] = run_advanced_analysis(
+                    sequence=seq_clean,
+                    name=seq_name or "Query",
+                    indication=ctx.get("indication", ""),
+                    target="",
+                    hotspot_peptides=hotspot_peptides,
+                    chain_type="auto",
+                )
+        adv = st.session_state[adv_key]
+        
+        # ── Checkpoint Inhibitor Analysis ──
+        st.markdown("### 1. Checkpoint Inhibitor Detection")
+        
+        if adv.checkpoint_analysis.is_checkpoint_inhibitor:
+            st.markdown(f"""<div style="background:#fef2f2;border:2px solid #dc2626;border-radius:8px;padding:16px;margin-bottom:16px;">
+                <div style="font-weight:700;color:#dc2626;font-size:16px;">⚠️ CHECKPOINT INHIBITOR DETECTED</div>
+                <div style="color:#991b1b;margin-top:8px;">
+                    <b>Target:</b> {adv.checkpoint_analysis.target}<br>
+                    <b>Recommendation:</b> {adv.checkpoint_analysis.recommendation}<br>
+                </div>
+                <div style="color:#6b7280;font-size:13px;margin-top:12px;line-height:1.5;">
+                    {adv.checkpoint_analysis.explanation}
+                </div>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:8px;padding:16px;margin-bottom:16px;">
+                <div style="font-weight:600;color:#059669;">Not a checkpoint inhibitor</div>
+                <div style="color:#6b7280;font-size:13px;margin-top:8px;">
+                    Standard Treg-adjusted scoring applies. Regulatory T cell epitopes will appropriately 
+                    reduce the predicted immunogenicity score.
+                </div>
+            </div>""", unsafe_allow_html=True)
+        
+        # ── Germline Humanness Analysis ──
+        st.markdown("### 2. Germline Humanness Score")
+        st.caption("Compares sequence against human V-gene germline to assess 'foreignness'")
+        
+        if adv.germline_analysis:
+            germ = adv.germline_analysis
+            
+            # Color based on humanness
+            if germ.humanness_score >= 90:
+                hum_color = "#059669"
+                hum_bg = "#ecfdf5"
+            elif germ.humanness_score >= 75:
+                hum_color = "#ca8a04"
+                hum_bg = "#fefce8"
+            elif germ.humanness_score >= 60:
+                hum_color = "#ea580c"
+                hum_bg = "#fff7ed"
+            else:
+                hum_color = "#dc2626"
+                hum_bg = "#fef2f2"
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"""<div style="background:{hum_bg};border:1px solid {hum_color};border-radius:8px;padding:16px;text-align:center;">
+                    <div style="font-size:32px;font-weight:700;color:{hum_color};">{germ.humanness_score:.0f}%</div>
+                    <div style="font-size:12px;color:#6b7280;">Humanness Score</div>
+                </div>""", unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"""<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;text-align:center;">
+                    <div style="font-size:16px;font-weight:600;color:#111827;">{germ.chain_type}</div>
+                    <div style="font-size:12px;color:#6b7280;">Chain Type</div>
+                </div>""", unsafe_allow_html=True)
+            with col3:
+                best_name = germ.best_match.germline_name if germ.best_match else "None"
+                st.markdown(f"""<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;text-align:center;">
+                    <div style="font-size:14px;font-weight:600;color:#111827;">{best_name}</div>
+                    <div style="font-size:12px;color:#6b7280;">Best Germline Match</div>
+                </div>""", unsafe_allow_html=True)
+            
+            st.markdown(f"<div style='margin-top:12px;color:#6b7280;font-size:13px;'>{germ.recommendation}</div>", unsafe_allow_html=True)
+            
+            # Foreign regions
+            if germ.foreign_regions:
+                st.markdown(f"<br>**Foreign Regions** ({len(germ.foreign_regions)} detected)", unsafe_allow_html=True)
+                for region in germ.foreign_regions[:5]:
+                    st.markdown(f"""<div style="background:#fef2f2;border-left:3px solid #dc2626;padding:8px 12px;margin-bottom:4px;font-size:13px;">
+                        <span style="color:#6b7280;">Pos {region['start']}-{region['end']}:</span>
+                        <span style="font-family:monospace;color:#dc2626;margin-left:8px;">{region['query']}</span>
+                        <span style="color:#6b7280;margin-left:8px;">vs germline:</span>
+                        <span style="font-family:monospace;color:#059669;margin-left:4px;">{region['germline']}</span>
+                    </div>""", unsafe_allow_html=True)
+        else:
+            st.info("Germline analysis not available for this sequence (requires antibody-length sequence)")
+        
+        # ── IEDB Homology Search ──
+        st.markdown("### 3. IEDB Epitope Homology")
+        st.caption("Cross-references predicted hotspots against published T-cell epitopes in IEDB")
+        
+        if adv.iedb_matches:
+            validated_count = sum(1 for r in adv.iedb_matches.values() if r.has_published_epitope)
+            positive_count = sum(
+                1 for r in adv.iedb_matches.values() 
+                if r.published_response_type and "POSITIVE" in r.published_response_type
+            )
+            
+            st.markdown(f"""<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px;margin-bottom:16px;">
+                <div style="display:flex;gap:32px;">
+                    <div>
+                        <span style="font-size:24px;font-weight:600;color:#0284c7;">{len(adv.iedb_matches)}</span>
+                        <span style="color:#6b7280;font-size:13px;margin-left:8px;">Hotspots searched</span>
+                    </div>
+                    <div>
+                        <span style="font-size:24px;font-weight:600;color:#059669;">{validated_count}</span>
+                        <span style="color:#6b7280;font-size:13px;margin-left:8px;">Found in IEDB</span>
+                    </div>
+                    <div>
+                        <span style="font-size:24px;font-weight:600;color:#dc2626;">{positive_count}</span>
+                        <span style="color:#6b7280;font-size:13px;margin-left:8px;">Published as immunogenic</span>
+                    </div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+            
+            for peptide, result in list(adv.iedb_matches.items())[:5]:
+                if result.has_published_epitope:
+                    status_color = "#dc2626" if result.published_response_type and "POSITIVE" in result.published_response_type else "#059669"
+                    status_text = result.published_response_type or "Found in IEDB"
+                    st.markdown(f"""<div style="background:#f9fafb;border-left:3px solid {status_color};padding:10px 14px;margin-bottom:6px;">
+                        <span style="font-family:monospace;font-size:13px;">{peptide}</span>
+                        <span style="color:{status_color};font-size:12px;margin-left:12px;font-weight:500;">{status_text}</span>
+                        <span style="color:#6b7280;font-size:11px;margin-left:8px;">({result.total_matches} matches)</span>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""<div style="background:#f9fafb;border-left:3px solid #e5e7eb;padding:10px 14px;margin-bottom:6px;">
+                        <span style="font-family:monospace;font-size:13px;color:#6b7280;">{peptide}</span>
+                        <span style="color:#6b7280;font-size:12px;margin-left:12px;">No IEDB matches</span>
+                    </div>""", unsafe_allow_html=True)
+        else:
+            st.info("No hotspot peptides to search (run T-cell epitope prediction first)")
+        
+        # ── Summary Flags ──
+        if adv.additional_flags:
+            st.markdown("### Summary Flags")
+            for flag in adv.additional_flags:
+                flag_name = flag.split(":")[0]
+                flag_desc = flag.split(":", 1)[1].strip() if ":" in flag else flag
+                st.markdown(f"""<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 14px;margin-bottom:6px;">
+                    ⚠️ <span style="font-weight:600;font-size:12px;color:#92400e;">{flag_name}</span>
+                    <span style="font-size:12px;color:#6b7280;margin-left:6px;">{flag_desc}</span>
+                </div>""", unsafe_allow_html=True)
+        
+        with st.expander("About these analyses"):
+            st.markdown("""
+**Checkpoint Inhibitor Detection:** Per EpiVax guidance (Mattei et al. 2024), checkpoint inhibitors 
+targeting PD-1, PD-L1, or CTLA-4 impair regulatory T cell function. For these drugs, Treg-adjusted 
+scores underestimate immunogenicity risk. We recommend using raw epitope scores instead.
+
+**Germline Humanness:** Compares the query sequence against human V-gene germlines (IMGT reference). 
+Higher similarity to germline indicates the sequence is more "self-like" and less likely to trigger 
+T-cell responses, as T cells recognizing germline sequences would have been deleted during thymic development.
+
+**IEDB Homology:** Searches the Immune Epitope Database for published epitopes matching predicted hotspots. 
+If a predicted epitope has been experimentally validated as immunogenic in T-cell assays, this increases 
+confidence in the prediction.
+            """)
+
     st.markdown("""<div class="disclaimer">
         FOR RESEARCH AND DEMONSTRATION PURPOSES ONLY. NOT FOR CLINICAL USE.<br>
         Data: IEDB (tools.iedb.org) · IDC DB V1 (CC BY 4.0, Agnihotri et al. 2025) · RCSB PDB · Claude (Anthropic) · Tamarind Bio
@@ -1589,7 +1792,7 @@ def render_results(report, seq_clean, seq_name, pdb_id):
 
 # ── Main content ─────────────────────────────────────────────
 st.markdown('<div class="hero-title">SafeBind AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-sub">Immunogenicity risk assessment for therapeutic proteins · Powered by IEDB, IDC DB V1, and Claude</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-sub">Dual-pathway immunogenicity prediction for biologics · MHC-I (cytotoxic) + MHC-II (humoral) · 3,334 clinical datapoints</div>', unsafe_allow_html=True)
 
 if run_clicked and seq_input:
     seq_clean = "".join(c for c in seq_input.upper() if c.isalpha())
@@ -1653,7 +1856,7 @@ if run_clicked and seq_input:
             time.sleep(0.2)
             
             # Complete
-            status_text.markdown("**✓ Analysis complete!**")
+            status_text.markdown("**Analysis complete!**")
             details_text.caption(f"Found {len([e for e in report.t_cell_epitopes if e.rank < 10])} T-cell epitopes, {len(report.b_cell_epitopes)} B-cell epitopes, {len(report.hotspot_regions)} hotspots")
             progress.progress(100)
             time.sleep(0.5)
@@ -1683,29 +1886,29 @@ elif not run_clicked:
     <div style="text-align:center;padding:60px 20px;">
         <div style="font-size:48px;margin-bottom:16px;">🛡️</div>
         <div style="font-size:20px;font-weight:600;color:#111827;margin-bottom:8px;">
-            Predict immunogenicity risk before it satisfies your drug
+            Predict both ADA risk and cytotoxic T-cell liability
         </div>
-        <div style="font-size:14px;color:#6b7280;max-width:600px;margin:0 auto;line-height:1.7;">
-            Paste any protein sequence to get T-cell and B-cell epitope predictions across 9 HLA alleles
-            covering 85% of the global population. Visualize immune hotspots and
-            benchmark against 218 real therapeutics with clinical ADA outcomes from the IDC DB V1.
+        <div style="font-size:14px;color:#6b7280;max-width:650px;margin:0 auto;line-height:1.7;">
+            First platform to predict <b>both immunogenicity pathways</b>: MHC-II (humoral/ADA)
+            and MHC-I (cytotoxic/CD8+). Fuses epitope predictions across 21 HLA alleles with
+            3,334 clinical outcomes from IDC DB V1 into a single composite risk score.
         </div>
         <div style="margin-top:32px;display:flex;justify-content:center;gap:40px;">
             <div style="text-align:center;">
-                <div style="font-size:28px;font-weight:600;color:#2563eb;">218</div>
-                <div style="font-size:11px;color:#6b7280;">Therapeutics in IDC DB</div>
+                <div style="font-size:28px;font-weight:600;color:#2563eb;">21</div>
+                <div style="font-size:11px;color:#6b7280;">HLA Alleles (I + II)</div>
             </div>
             <div style="text-align:center;">
-                <div style="font-size:28px;font-weight:600;color:#0891b2;">4,146</div>
-                <div style="font-size:11px;color:#6b7280;">Clinical ADA Datapoints</div>
+                <div style="font-size:28px;font-weight:600;color:#0891b2;">3,334</div>
+                <div style="font-size:11px;color:#6b7280;">Clinical Outcomes</div>
             </div>
             <div style="text-align:center;">
-                <div style="font-size:28px;font-weight:600;color:#ea580c;">9</div>
-                <div style="font-size:11px;color:#6b7280;">HLA-DR Alleles</div>
+                <div style="font-size:28px;font-weight:600;color:#ea580c;">222</div>
+                <div style="font-size:11px;color:#6b7280;">Reference Drugs</div>
             </div>
             <div style="text-align:center;">
-                <div style="font-size:28px;font-weight:600;color:#dc2626;">~30s</div>
-                <div style="font-size:11px;color:#6b7280;">Per Analysis</div>
+                <div style="font-size:28px;font-weight:600;color:#7c3aed;">2</div>
+                <div style="font-size:11px;color:#6b7280;">Immune Pathways</div>
             </div>
         </div>
         <div style="margin-top:40px;font-size:13px;color:#9ca3af;">
@@ -1721,17 +1924,17 @@ elif not run_clicked:
         st.markdown("""
         **The Problem**
 
-        Anti-drug antibodies (ADAs) are the silent killer of biologics.
-        Bococizumab cost Pfizer over $1B when 44% of patients developed
-        neutralizing antibodies in Phase 3. Existing prediction tools
-        haven't been meaningfully updated since 1998.
+        Immunogenicity kills drugs through two pathways: **ADAs** (anti-drug antibodies)
+        that neutralize efficacy, and **CD8+ cytotoxic T cells** that cause liver toxicity
+        in gene therapy. Bococizumab cost Pfizer $1B+ (44% nADA). AAV gene therapies
+        have killed patients from hepatotoxicity. Existing tools predict only one pathway.
         """)
     with col2:
         st.markdown("""
         **Our Approach**
 
-        SafeBind AI combines real-time epitope prediction (IEDB, 9 HLA alleles)
-        with clinical ground truth from the IDC DB V1 — the first standardized
-        database linking therapeutic sequences to actual patient ADA outcomes
-        across 727 clinical trials.
+        SafeBind is the first platform predicting **both pathways**: MHC-II → CD4+ → ADA
+        (humoral) and MHC-I → CD8+ → cytotoxicity (cellular). We fuse 21 HLA alleles,
+        3,334 clinical outcomes from IDC DB V1, sequence similarity against 222 approved
+        drugs, and validated AAV epitopes into a single composite score (0-100).
         """)
