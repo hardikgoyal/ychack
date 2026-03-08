@@ -600,14 +600,15 @@ def get_tamarind_job_status(api_key: str, job_name: str) -> str:
             data = resp.json()
             jobs = data if isinstance(data, list) else data.get("jobs", [])
             for job in jobs:
+                # Tamarind uses PascalCase: JobName, JobStatus
                 name = (
-                    job.get("jobName")
+                    job.get("JobName")
+                    or job.get("jobName")
                     or job.get("name")
-                    or job.get("job_name")
                     or ""
                 )
                 if name == job_name:
-                    status = str(job.get("status", "")).lower()
+                    status = str(job.get("JobStatus") or job.get("status", "")).lower()
                     if any(s in status for s in ["complete", "done", "success", "finish"]):
                         return "complete"
                     if any(s in status for s in ["fail", "error", "cancel"]):

@@ -305,20 +305,22 @@ def render_results(report, seq_clean, seq_name, pdb_id):
         "HIGH": "risk-high", "VERY HIGH": "risk-very-high"
     }.get(report.risk_category, "risk-moderate")
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     strong = len([e for e in report.t_cell_epitopes if e.rank < 10])
     with col1:
         st.markdown(f'<div class="metric-card"><div class="metric-value {risk_class}">{report.overall_risk_score:.0%}</div><div class="metric-label">Overall Risk</div></div>', unsafe_allow_html=True)
     with col2:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#111827;">{report.risk_category}</div><div class="metric-label">Risk Category</div></div>', unsafe_allow_html=True)
     with col3:
-        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#ea580c;">{strong}</div><div class="metric-label">Strong T-cell Binders</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#ea580c;">{strong}</div><div class="metric-label">T-cell Epitopes</div></div>', unsafe_allow_html=True)
     with col4:
-        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#0891b2;">{len(report.hotspot_regions)}</div><div class="metric-label">Hotspot Regions</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#0891b2;">{len(report.b_cell_epitopes)}</div><div class="metric-label">B-cell Epitopes</div></div>', unsafe_allow_html=True)
+    with col5:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#7c3aed;">{len(report.hotspot_regions)}</div><div class="metric-label">Hotspot Regions</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🧬 3D Heatmap", "🔥 Hotspots", "📊 Residue Plot", "🏥 Clinical Context", "🤖 AI Report"
+    tab1, tab2, tab2b, tab3, tab4, tab5 = st.tabs([
+        "🧬 3D Heatmap", "🔥 T-cell Hotspots", "🧫 B-cell Epitopes", "📊 Residue Plot", "🏥 Clinical Context", "🤖 AI Report"
     ])
 
     # ── Tab 1: 3D Heatmap ──
@@ -401,7 +403,28 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                         <span>Max: <b style="color:#dc2626;">{hs['max_risk']:.0%}</b></span>
                     </div></div>""", unsafe_allow_html=True)
         else:
-            st.success("No significant hotspot regions detected above threshold.")
+            st.success("No significant T-cell hotspot regions detected above threshold.")
+
+    # ── Tab 2b: B-cell epitopes ──
+    with tab2b:
+        st.markdown("**Linear B-cell epitope regions** (predicted by IEDB Bepipred)")
+        st.caption("These regions are likely accessible on the protein surface and may trigger antibody responses.")
+        if report.b_cell_epitopes:
+            for i, be in enumerate(report.b_cell_epitopes, 1):
+                score_pct = be.avg_score
+                bar_color = "#0891b2" if score_pct > 0.7 else "#06b6d4" if score_pct > 0.5 else "#22d3ee"
+                st.markdown(f"""<div class="hotspot-row">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <span style="font-weight:600;font-size:15px;color:#111827;">B-cell Epitope {i}</span>
+                            <span style="color:#6b7280;font-size:13px;margin-left:8px;">Positions {be.start}–{be.end} ({be.end - be.start + 1} residues)</span>
+                        </div>
+                        <div style="font-weight:600;font-size:18px;color:{bar_color};">{be.avg_score:.0%}</div>
+                    </div>
+                    <div class="hotspot-seq" style="margin-top:8px;">{be.sequence}</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.success("No significant B-cell epitope regions detected above threshold.")
 
     # ── Tab 3: Residue plot ──
     with tab3:
