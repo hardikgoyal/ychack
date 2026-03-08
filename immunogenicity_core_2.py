@@ -44,6 +44,17 @@ class BCellEpitope:
     end: int
     sequence: str
     avg_score: float
+    surface_exposed: Optional[bool] = None  # True if solvent-accessible
+    avg_sasa: Optional[float] = None  # Average solvent-accessible surface area
+
+
+@dataclass
+class ConformationalEpitope:
+    """A discontinuous/conformational B-cell epitope (residues close in 3D, far in sequence)."""
+    residue_positions: List[int]
+    residues: str
+    avg_score: float
+    center_of_mass: Optional[tuple] = None  # (x, y, z)
 
 @dataclass
 class ResidueRisk:
@@ -54,6 +65,10 @@ class ResidueRisk:
     b_cell_risk: float
     combined_risk: float
     num_alleles_binding: int
+    sasa: Optional[float] = None  # Solvent-accessible surface area (Å²)
+    is_surface: Optional[bool] = None  # True if SASA > threshold
+    in_cdr: Optional[bool] = None  # True if in CDR region
+    cdr_label: Optional[str] = None  # "CDR-H1", "CDR-H2", etc.
 
 @dataclass
 class AssessmentReport:
@@ -68,6 +83,10 @@ class AssessmentReport:
     hotspot_regions: List[Dict[str, Any]]
     comparable_therapeutics: List[Dict[str, Any]]
     pdb_data: Optional[str] = None  # PDB file content
+    surface_b_cell_epitopes: Optional[List[BCellEpitope]] = None  # SASA-filtered
+    conformational_epitopes: Optional[List[ConformationalEpitope]] = None
+    cdr_regions: Optional[List[Dict[str, Any]]] = None  # Detected CDR regions
+    cdr_epitope_overlaps: Optional[List[Dict[str, Any]]] = None  # nADA risk flags
 
 
 # ── IEDB API calls ───────────────────────────────────────────
@@ -272,6 +291,267 @@ def fetch_pdb(pdb_id: str) -> Optional[str]:
     except requests.exceptions.RequestException:
         pass
     return None
+
+
+# ── Solvent Accessibility (SASA) calculation ─────────────────
+
+def calculate_sasa_from_pdb(pdb_data: str, chain: str = "A") -> Dict[int, float]:
+    """Calculate per-residue solvent-accessible surface area from PDB data.
+    
+    Uses a simplified rolling-ball algorithm approximation based on 
+    CA atom exposure. Returns dict of {residue_number: SASA_value}.
+    
+    For more accurate SASA, you'd use DSSP or FreeSASA, but this gives
+    a reasonable approximation for filtering surface vs buried residues.
+    """
+    if not pdb_data:
+        return {}
+    
+    # Parse CA atoms from PDB
+    ca_atoms = []  # [(resnum, x, y, z)]
+    for line in pdb_data.split("\n"):
+        if line.startswith("ATOM") and " CA " in line:
+            try:
+                atom_chain = line[21].strip()
+                if atom_chain != chain and chain != "":
+                    continue
+                resnum = int(line[22:26].strip())
+                x = float(line[30:38].strip())
+                y = float(line[38:46].strip())
+                z = float(line[46:54].strip())
+                ca_atoms.append((resnum, x, y, z))
+            except (ValueError, IndexError):
+                continue
+    
+    if not ca_atoms:
+        return {}
+    
+    # Calculate neighbor count for each residue (proxy for burial)
+    # Residues with fewer neighbors within 10Å are more surface-exposed
+    sasa_scores = {}
+    probe_radius = 10.0  # Å
+    
+    for i, (resnum, x1, y1, z1) in enumerate(ca_atoms):
+        neighbor_count = 0
+        for j, (_, x2, y2, z2) in enumerate(ca_atoms):
+            if i == j:
+                continue
+            dist = ((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2) ** 0.5
+            if dist < probe_radius:
+                neighbor_count += 1
+        
+        # Convert neighbor count to SASA-like score
+        # Fewer neighbors = higher SASA (more exposed)
+        # Typical buried residue has 10-15 neighbors, surface has 3-8
+        max_neighbors = 15
+        exposure = max(0, 1.0 - (neighbor_count / max_neighbors))
+        sasa_scores[resnum] = exposure * 100  # Scale to 0-100 Å² equivalent
+    
+    return sasa_scores
+
+
+def is_surface_exposed(sasa: float, threshold: float = 25.0) -> bool:
+    """Determine if a residue is surface-exposed based on SASA."""
+    return sasa >= threshold
+
+
+# ── CDR Detection (Antibody-specific) ────────────────────────
+
+# Kabat numbering CDR definitions for heavy and light chains
+CDR_DEFINITIONS = {
+    "heavy": {
+        "CDR-H1": (31, 35),   # Kabat: 31-35 (can extend to 35B)
+        "CDR-H2": (50, 65),   # Kabat: 50-65
+        "CDR-H3": (95, 102),  # Kabat: 95-102
+    },
+    "light": {
+        "CDR-L1": (24, 34),   # Kabat: 24-34
+        "CDR-L2": (50, 56),   # Kabat: 50-56
+        "CDR-L3": (89, 97),   # Kabat: 89-97
+    }
+}
+
+# Common CDR motifs to help identify CDRs without numbering
+CDR_MOTIFS = {
+    "CDR-H3": ["CAR", "CAK", "CTR"],  # Common H3 anchors
+    "CDR-L3": ["CQQ", "CQH", "CQY"],  # Common L3 anchors
+}
+
+
+def detect_cdr_regions(sequence: str, chain_type: str = "heavy") -> List[Dict[str, Any]]:
+    """Detect CDR regions in an antibody sequence.
+    
+    Uses a combination of:
+    1. Position-based detection (assuming standard numbering)
+    2. Motif-based detection (looking for conserved CDR anchors)
+    
+    Returns list of {"label": "CDR-H1", "start": 31, "end": 35, "sequence": "..."}
+    """
+    cdrs = []
+    seq_len = len(sequence)
+    
+    # Try position-based detection first
+    definitions = CDR_DEFINITIONS.get(chain_type, CDR_DEFINITIONS["heavy"])
+    
+    for cdr_name, (start, end) in definitions.items():
+        if start <= seq_len and end <= seq_len:
+            cdr_seq = sequence[start-1:end]  # Convert to 0-indexed
+            cdrs.append({
+                "label": cdr_name,
+                "start": start,
+                "end": end,
+                "sequence": cdr_seq,
+                "method": "position"
+            })
+    
+    # Also try motif-based detection for CDR-H3 (most variable, most important for nADA)
+    for motif in CDR_MOTIFS.get("CDR-H3", []):
+        idx = sequence.find(motif)
+        if idx != -1:
+            # CDR-H3 typically starts after the CAR/CAK motif
+            h3_start = idx + len(motif)
+            # Look for the end motif (WG or FG)
+            for end_motif in ["WG", "FG"]:
+                end_idx = sequence.find(end_motif, h3_start)
+                if end_idx != -1 and end_idx - h3_start < 25:  # CDR-H3 usually < 25 aa
+                    cdrs.append({
+                        "label": "CDR-H3",
+                        "start": h3_start + 1,  # 1-indexed
+                        "end": end_idx,
+                        "sequence": sequence[h3_start:end_idx],
+                        "method": "motif"
+                    })
+                    break
+    
+    # Deduplicate CDRs (prefer motif-detected over position-detected)
+    seen_labels = set()
+    unique_cdrs = []
+    for cdr in sorted(cdrs, key=lambda x: (x["label"], x["method"] == "position")):
+        if cdr["label"] not in seen_labels:
+            seen_labels.add(cdr["label"])
+            unique_cdrs.append(cdr)
+    
+    return unique_cdrs
+
+
+def check_cdr_epitope_overlap(cdrs: List[Dict], epitope_start: int, epitope_end: int) -> Optional[Dict]:
+    """Check if an epitope overlaps with any CDR region.
+    
+    Returns the overlapping CDR info if found, None otherwise.
+    Overlap with CDRs = higher neutralizing ADA (nADA) risk.
+    """
+    for cdr in cdrs:
+        cdr_start, cdr_end = cdr["start"], cdr["end"]
+        # Check for overlap
+        if not (epitope_end < cdr_start or epitope_start > cdr_end):
+            overlap_start = max(epitope_start, cdr_start)
+            overlap_end = min(epitope_end, cdr_end)
+            return {
+                "cdr": cdr["label"],
+                "overlap_start": overlap_start,
+                "overlap_end": overlap_end,
+                "overlap_length": overlap_end - overlap_start + 1,
+                "nada_risk": "HIGH" if cdr["label"] == "CDR-H3" else "MODERATE"
+            }
+    return None
+
+
+# ── IEDB ElliPro API for conformational epitopes ─────────────
+
+def predict_conformational_epitopes_ellipro(pdb_data: str, chain: str = "A") -> List[ConformationalEpitope]:
+    """Call IEDB ElliPro API for conformational B-cell epitope prediction.
+    
+    ElliPro predicts discontinuous epitopes based on:
+    1. Protrusion Index (PI) - how much residues stick out
+    2. Clustering of high-PI residues in 3D space
+    
+    Note: This requires the PDB structure. Falls back to empty list if no structure.
+    """
+    if not pdb_data:
+        return []
+    
+    try:
+        url = "http://tools-cluster-interface.iedb.org/tools_api/bcell/"
+        
+        # ElliPro accepts PDB file content
+        data = {
+            "method": "Ellipro",
+            "sequence_text": pdb_data[:50000],  # Truncate if too long
+            "chain": chain,
+        }
+        
+        resp = requests.post(url, data=data, timeout=120)
+        if resp.status_code != 200:
+            return []
+        
+        # Parse ElliPro output (tab-separated)
+        epitopes = []
+        lines = resp.text.strip().split("\n")
+        
+        for line in lines[1:]:  # Skip header
+            cols = line.split("\t")
+            if len(cols) >= 4:
+                try:
+                    # ElliPro returns: Chain, Start, End, Peptide, Score, ...
+                    start = int(cols[1])
+                    end = int(cols[2])
+                    sequence = cols[3] if len(cols) > 3 else ""
+                    score = float(cols[4]) if len(cols) > 4 else 0.5
+                    
+                    epitopes.append(ConformationalEpitope(
+                        residue_positions=list(range(start, end + 1)),
+                        residues=sequence,
+                        avg_score=score,
+                    ))
+                except (ValueError, IndexError):
+                    continue
+        
+        return epitopes
+        
+    except requests.exceptions.RequestException:
+        return []
+
+
+# ── Surface-filtered B-cell epitopes ─────────────────────────
+
+def filter_surface_bcell_epitopes(
+    b_cell_epitopes: List[BCellEpitope],
+    sasa_scores: Dict[int, float],
+    threshold: float = 25.0
+) -> List[BCellEpitope]:
+    """Filter B-cell epitopes to only include surface-exposed regions.
+    
+    An epitope is considered surface-exposed if >50% of its residues
+    have SASA above the threshold.
+    """
+    surface_epitopes = []
+    
+    for epitope in b_cell_epitopes:
+        surface_count = 0
+        total_sasa = 0.0
+        valid_residues = 0
+        
+        for pos in range(epitope.start, epitope.end + 1):
+            sasa = sasa_scores.get(pos, 0)
+            total_sasa += sasa
+            valid_residues += 1
+            if is_surface_exposed(sasa, threshold):
+                surface_count += 1
+        
+        # Require >50% of residues to be surface-exposed
+        if valid_residues > 0 and (surface_count / valid_residues) > 0.5:
+            avg_sasa = total_sasa / valid_residues
+            surface_epitope = BCellEpitope(
+                start=epitope.start,
+                end=epitope.end,
+                sequence=epitope.sequence,
+                avg_score=epitope.avg_score,
+                surface_exposed=True,
+                avg_sasa=avg_sasa
+            )
+            surface_epitopes.append(surface_epitope)
+    
+    return surface_epitopes
 
 
 # ── 3D Heatmap HTML generation ───────────────────────────────
@@ -622,34 +902,61 @@ def get_tamarind_job_status(api_key: str, job_name: str) -> str:
 def fetch_tamarind_pdb(api_key: str, job_name: str) -> Optional[str]:
     """Download the PDB from a completed Tamarind structure prediction job.
 
-    Tries the most common output filenames for ESMFold and AlphaFold2.
+    The Tamarind API returns a signed URL to a ZIP file containing results.
+    We download the ZIP and extract the PDB file from it.
     """
+    import zipfile
+    import io
+    
     if not api_key:
         return None
     headers = {"x-api-key": api_key}
-    candidate_files = [
-        "esmfold.pdb",
-        "output.pdb",
-        "rank_001_alphafold2_ptm_model_1_seed_000.pdb",
-        "rank_1.pdb",
-        f"{job_name}.pdb",
-        "prediction.pdb",
-        "structure.pdb",
-    ]
-    for filename in candidate_files:
-        try:
-            resp = requests.post(
-                TAMARIND_BASE_URL + "result",
-                headers=headers,
-                json={"jobName": job_name, "filename": filename},
-                timeout=30,
-            )
-            if resp.status_code == 200 and len(resp.text) > 200:
-                if any(k in resp.text for k in ("ATOM", "HETATM", "MODEL")):
-                    return resp.text
-        except requests.exceptions.RequestException:
-            continue
-    return None
+    
+    try:
+        # Step 1: Get the download URL from Tamarind API
+        resp = requests.post(
+            TAMARIND_BASE_URL + "result",
+            headers=headers,
+            json={"jobName": job_name},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return None
+        
+        # The response is a JSON string containing the download URL
+        download_url = resp.text.strip().strip('"')
+        if not download_url.startswith("http"):
+            return None
+        
+        # Step 2: Download the ZIP file
+        zip_resp = requests.get(download_url, timeout=60)
+        if zip_resp.status_code != 200:
+            return None
+        
+        # Step 3: Extract PDB from ZIP
+        with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
+            # Look for PDB files in the archive
+            pdb_candidates = [
+                "esmfold.pdb",
+                "output.pdb",
+                "structure.pdb",
+                "prediction.pdb",
+            ]
+            
+            # First try known names
+            for name in pdb_candidates:
+                if name in zf.namelist():
+                    return zf.read(name).decode('utf-8')
+            
+            # Then try any .pdb file
+            for name in zf.namelist():
+                if name.endswith('.pdb'):
+                    return zf.read(name).decode('utf-8')
+        
+        return None
+        
+    except (requests.exceptions.RequestException, zipfile.BadZipFile, KeyError):
+        return None
 
 
 # ── Summary generation ───────────────────────────────────────
@@ -763,12 +1070,78 @@ def run_immunogenicity_assessment(
     pdb_data = None
     if pdb_id:
         if verbose:
-            print(f"[4/5] Fetching PDB structure {pdb_id}...")
+            print(f"[4/8] Fetching PDB structure {pdb_id}...")
         pdb_data = fetch_pdb(pdb_id)
 
-    # Step 6: IDC comparables
+    # Step 6: Structure-aware analysis (if PDB available)
+    sasa_scores = {}
+    surface_b_cell_epitopes = []
+    conformational_epitopes = []
+    cdr_regions = []
+    cdr_epitope_overlaps = []
+    
+    if pdb_data:
+        if verbose:
+            print(f"[5/8] Calculating solvent accessibility (SASA)...")
+        sasa_scores = calculate_sasa_from_pdb(pdb_data, chain=pdb_chain)
+        
+        # Update residue risks with SASA info
+        for rr in residue_risks:
+            if rr.position in sasa_scores:
+                rr.sasa = sasa_scores[rr.position]
+                rr.is_surface = is_surface_exposed(rr.sasa)
+        
+        if verbose:
+            print(f"[6/8] Filtering surface-exposed B-cell epitopes...")
+        surface_b_cell_epitopes = filter_surface_bcell_epitopes(
+            b_cell_epitopes, sasa_scores, threshold=25.0
+        )
+        
+        # Skip ElliPro API call for now (slow, can add later)
+        # conformational_epitopes = predict_conformational_epitopes_ellipro(pdb_data, pdb_chain)
+    
+    # Step 7: CDR detection (for antibodies)
     if verbose:
-        print(f"[5/5] Loading IDC DB V1 comparables...")
+        print(f"[7/8] Detecting CDR regions...")
+    
+    # Try to detect CDRs
+    cdr_regions = detect_cdr_regions(sequence, chain_type="heavy")
+    
+    # Check if any hotspots overlap with CDRs (nADA risk)
+    if cdr_regions:
+        for hs in hotspot_regions:
+            overlap = check_cdr_epitope_overlap(cdr_regions, hs["start"], hs["end"])
+            if overlap:
+                cdr_epitope_overlaps.append({
+                    "hotspot_start": hs["start"],
+                    "hotspot_end": hs["end"],
+                    "hotspot_sequence": hs["sequence"],
+                    **overlap
+                })
+        
+        # Also check B-cell epitopes
+        for be in b_cell_epitopes:
+            overlap = check_cdr_epitope_overlap(cdr_regions, be.start, be.end)
+            if overlap:
+                cdr_epitope_overlaps.append({
+                    "epitope_type": "B-cell",
+                    "epitope_start": be.start,
+                    "epitope_end": be.end,
+                    "epitope_sequence": be.sequence,
+                    **overlap
+                })
+        
+        # Update residue risks with CDR info
+        for rr in residue_risks:
+            for cdr in cdr_regions:
+                if cdr["start"] <= rr.position <= cdr["end"]:
+                    rr.in_cdr = True
+                    rr.cdr_label = cdr["label"]
+                    break
+
+    # Step 8: IDC comparables
+    if verbose:
+        print(f"[8/8] Loading IDC DB V1 comparables...")
     comparables = load_idc_comparables(idc_data_path, species=species, modality=modality)
 
     # Overall risk score
@@ -790,6 +1163,10 @@ def run_immunogenicity_assessment(
         hotspot_regions=hotspot_regions,
         comparable_therapeutics=comparables,
         pdb_data=pdb_data,
+        surface_b_cell_epitopes=surface_b_cell_epitopes if surface_b_cell_epitopes else None,
+        conformational_epitopes=conformational_epitopes if conformational_epitopes else None,
+        cdr_regions=cdr_regions if cdr_regions else None,
+        cdr_epitope_overlaps=cdr_epitope_overlaps if cdr_epitope_overlaps else None,
     )
 
     if verbose:

@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
+.pdb_cache/
+saved_sequences.json
