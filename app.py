@@ -16,7 +16,7 @@ from data_loader import (
 )
 from risk_model import predict_ada
 from sequence_engine import (
-    parse_fasta, align_to_references, get_sequence_diffs,
+    parse_multi_fasta, align_to_references, get_sequence_diffs,
     predict_epitopes, compute_epitope_density,
 )
 from claude_report import generate_risk_memo
@@ -35,9 +35,9 @@ st.sidebar.markdown("*Immunogenicity Risk Assessment*")
 st.sidebar.divider()
 
 sequence_input = st.sidebar.text_area(
-    "Protein Sequence (FASTA or raw)",
-    height=150,
-    placeholder="Paste amino acid sequence here...\nRequired for structural analysis (Parts 2 & 3)",
+    "Protein Sequence (multi-chain FASTA or raw)",
+    height=180,
+    placeholder=">Heavy Chain 1\nEVQLVESGGG...\n>Heavy Chain 2\nEVQLVESGGG...\n>Light Chain\nDIQMTQSPS...",
 )
 
 st.sidebar.divider()
@@ -66,13 +66,12 @@ if not analyze:
     **How it works:**
     - **Empirical Benchmarking** — Historical ADA rates matched by route, disease, and modality
     - **Sequence Similarity** — Alignment to 222 reference sequences from approved drugs
-    - **T-cell Epitope Prediction** — IEDB MHC-II binding analysis
-    - **AI Synthesis** — Claude-powered risk memo with modification recommendations
+    - **T-cell Epitope Prediction** — IEDB MHC-II binding analysis per chain
+    - **AI Synthesis** — Claude-powered risk memo with per-chain modification recommendations
 
-    Configure your candidate in the sidebar and click **Analyze Risk**.
+    Paste multi-chain FASTA (with `>headers`) or a single raw sequence, configure in sidebar, and click **Analyze Risk**.
     """)
 
-    # Show data overview
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Approved Drugs", "218")
@@ -84,28 +83,44 @@ if not analyze:
 
 
 # --- Run Analysis ---
-# Load data
 lookup_tables = build_lookup_table()
 drug_ada_map = build_drug_ada_map()
 sequences_df = load_sequences()
 
-# Parse sequence if provided
-parsed_seq = None
-alignment_results = None
-epitope_results = None
-sequence_diffs = None
-
+# Parse multi-chain sequences
+chains = {}  # {chain_name: sequence}
 if sequence_input.strip():
     try:
-        parsed_seq = parse_fasta(sequence_input)
-        st.sidebar.success(f"Sequence parsed: {len(parsed_seq)} residues")
+        chains = parse_multi_fasta(sequence_input)
+        chain_summary = ", ".join(f"{name} ({len(seq)}aa)" for name, seq in chains.items())
+        st.sidebar.success(f"{len(chains)} chain(s): {chain_summary}")
     except ValueError as e:
         st.sidebar.error(str(e))
-        parsed_seq = None
 
-# Run sequence alignment
-if parsed_seq:
-    alignment_results = align_to_references(parsed_seq, sequences_df)
+# Per-chain analysis results
+chain_alignments = {}   # {chain_name: [AlignmentResult]}
+chain_epitopes = {}     # {chain_name: [EpitopeResult]}
+chain_diffs = {}        # {chain_name: [(pos, q, r)]}
+
+# Run alignment per chain
+for chain_name, seq in chains.items():
+    chain_alignments[chain_name] = align_to_references(seq, sequences_df)
+
+# Aggregate: use the best alignment across all chains for risk model
+all_alignments = []
+for name, results in chain_alignments.items():
+    for r in results:
+        r.chain_descriptor = f"{name} → {r.chain_descriptor}"
+        all_alignments.append(r)
+# Sort by score descending, deduplicate by INN
+seen_inns = set()
+best_alignments = []
+for r in sorted(all_alignments, key=lambda x: x.score, reverse=True):
+    if r.inn_name not in seen_inns:
+        seen_inns.add(r.inn_name)
+        best_alignments.append(r)
+    if len(best_alignments) >= 5:
+        break
 
 # Run risk prediction
 risk_result = predict_ada(
@@ -116,13 +131,14 @@ risk_result = predict_ada(
     conjugate=conjugate,
     lookup_tables=lookup_tables,
     drug_ada_map=drug_ada_map,
-    alignment_results=alignment_results,
+    alignment_results=best_alignments if best_alignments else None,
 )
 
-# Get sequence diffs if we have alignment
-if alignment_results and len(alignment_results) > 0:
-    best_match = alignment_results[0]
-    sequence_diffs = get_sequence_diffs(parsed_seq, best_match.ref_sequence)
+# Per-chain sequence diffs
+for chain_name, results in chain_alignments.items():
+    if results:
+        best = results[0]
+        chain_diffs[chain_name] = get_sequence_diffs(chains[chain_name], best.ref_sequence)
 
 # ==============================
 # PART 1 — Prediction & Benchmarking
@@ -136,7 +152,6 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 with tab1:
-    # Main risk metric
     col_score, col_tier = st.columns([1, 2])
     with col_score:
         st.markdown(
@@ -164,15 +179,14 @@ with tab1:
             ],
             "Source": [
                 risk_result.lookup_level,
-                f"Top {len(alignment_results)} matches" if alignment_results else "No sequence",
-                "Species + Conjugate + Route",
+                f"Top {len(best_alignments)} matches across {len(chains)} chain(s)" if best_alignments else "No sequence",
+                "Modality + Species + Conjugate + Route",
             ],
         }
         st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
 
     st.divider()
 
-    # Benchmarking comparison
     col_chart, col_factors = st.columns([3, 2])
 
     with col_chart:
@@ -182,7 +196,6 @@ with tab1:
         if len(precedents) > 0:
             chart_data = precedents[["Therapeutic Assessed for ADA INN Name", "ada_pct", "total_patients"]].copy()
             chart_data.columns = ["Drug", "ADA Rate (%)", "Patients"]
-            # Add the candidate
             candidate_row = pd.DataFrame([{
                 "Drug": "YOUR CANDIDATE",
                 "ADA Rate (%)": risk_result.composite_score,
@@ -218,10 +231,10 @@ with tab1:
         else:
             st.success("No elevated risk factors identified.")
 
-        # Nearest drugs by sequence
-        if alignment_results:
+        # Nearest drugs by sequence (aggregated across chains)
+        if best_alignments:
             st.markdown("#### Nearest Drugs (by sequence)")
-            for r in alignment_results:
+            for r in best_alignments:
                 ada_str = f" — ADA: {drug_ada_map[r.inn_name]:.1f}%" if r.inn_name in drug_ada_map else ""
                 st.markdown(f"- **{r.inn_name}** ({r.chain_descriptor}): {r.pct_identity:.0%} identity{ada_str}")
 
@@ -246,121 +259,139 @@ with tab1:
         st.info("No historical precedents found for this combination.")
 
 # ==============================
-# PART 2 — Structural Risk Viewer
+# PART 2 — Structural Risk Viewer (per-chain)
 # ==============================
 with tab2:
-    if not parsed_seq:
+    if not chains:
         st.warning("Provide a protein sequence in the sidebar to enable structural analysis.")
     else:
-        st.markdown(f"#### Sequence Analysis ({len(parsed_seq)} residues)")
+        st.markdown(f"### Structural Analysis — {len(chains)} Chain(s)")
 
-        col_3d, col_epitopes = st.columns([3, 2])
+        # Create a tab per chain
+        chain_tabs = st.tabs(list(chains.keys()))
 
-        with col_3d:
-            st.markdown("#### 3D Protein Structure")
+        for chain_tab, (chain_name, chain_seq) in zip(chain_tabs, chains.items()):
+            with chain_tab:
+                st.markdown(f"**{chain_name}** — {len(chain_seq)} residues")
 
-            # Try Tamarind Bio ESMFold, fallback to sequence-only view
-            tamarind_key = os.environ.get("TAMARIND_API_KEY")
-            pdb_data = None
+                col_seq, col_ep = st.columns([3, 2])
 
-            if tamarind_key:
-                try:
-                    from tamarind_integration import fold_protein
-                    pdb_data = fold_protein(parsed_seq, tamarind_key)
-                except Exception as e:
-                    st.info(f"Tamarind API unavailable: {e}")
+                with col_seq:
+                    # Run IEDB for this chain
+                    ep_key = chain_name
+                    if ep_key not in chain_epitopes:
+                        chain_epitopes[ep_key] = predict_epitopes(chain_seq)
 
-            if pdb_data:
-                try:
-                    import stmol
-                    import py3Dmol
+                    ep_results = chain_epitopes[ep_key]
 
-                    view = py3Dmol.view(width=600, height=400)
-                    view.addModel(pdb_data, "pdb")
-                    view.setStyle({"cartoon": {"color": "spectrum"}})
-
-                    # Highlight epitope hotspots in red
-                    if epitope_results:
-                        epitope_positions = set()
-                        for ep in epitope_results:
-                            epitope_positions.update(range(ep.start, ep.end + 1))
-                        for pos in epitope_positions:
-                            view.addStyle(
-                                {"resi": pos},
-                                {"cartoon": {"color": "red"}, "stick": {"color": "red"}},
-                            )
-
-                    view.zoomTo()
-                    stmol.showmol(view, height=400, width=600)
-                except Exception as e:
-                    st.info(f"3D viewer unavailable: {e}. Showing sequence view.")
+                    # Try 3D view
+                    tamarind_key = os.environ.get("TAMARIND_API_KEY")
                     pdb_data = None
+                    if tamarind_key:
+                        try:
+                            from tamarind_integration import fold_protein
+                            pdb_data = fold_protein(chain_seq, tamarind_key)
+                        except Exception:
+                            pass
 
-            if not pdb_data:
-                st.info("Set `TAMARIND_API_KEY` for 3D protein folding. Showing sequence view.")
-                # Show sequence with epitope highlighting
-                if epitope_results:
-                    epitope_positions = set()
-                    for ep in epitope_results:
-                        epitope_positions.update(range(ep.start, ep.end + 1))
+                    if pdb_data:
+                        try:
+                            import stmol
+                            import py3Dmol
+                            view = py3Dmol.view(width=600, height=400)
+                            view.addModel(pdb_data, "pdb")
+                            view.setStyle({"cartoon": {"color": "spectrum"}})
+                            if ep_results:
+                                for ep in ep_results:
+                                    for pos in range(ep.start, ep.end + 1):
+                                        view.addStyle({"resi": pos}, {"cartoon": {"color": "red"}, "stick": {"color": "red"}})
+                            view.zoomTo()
+                            stmol.showmol(view, height=400, width=600)
+                        except Exception:
+                            pdb_data = None
 
-                    # Render sequence with color blocks
-                    seq_html = '<div style="font-family:monospace; word-wrap:break-word; line-height:1.8">'
-                    for i, aa in enumerate(parsed_seq):
-                        pos = i + 1  # 1-indexed
-                        if pos in epitope_positions:
-                            seq_html += f'<span style="background:#ff4444; color:white; padding:1px 2px; border-radius:2px" title="Epitope at {pos}">{aa}</span>'
+                    if not pdb_data:
+                        # Sequence view with epitope highlighting
+                        if ep_results:
+                            epitope_positions = set()
+                            for ep in ep_results:
+                                epitope_positions.update(range(ep.start, ep.end + 1))
+
+                            seq_html = '<div style="font-family:monospace; word-wrap:break-word; line-height:1.8">'
+                            for i, aa in enumerate(chain_seq):
+                                pos = i + 1
+                                if pos in epitope_positions:
+                                    seq_html += f'<span style="background:#ff4444; color:white; padding:1px 2px; border-radius:2px" title="Epitope at {pos}">{aa}</span>'
+                                else:
+                                    seq_html += f'<span style="color:#666" title="Position {pos}">{aa}</span>'
+                                if pos % 60 == 0:
+                                    seq_html += f' <span style="color:#999; font-size:0.8em">{pos}</span><br>'
+                            seq_html += "</div>"
+                            st.markdown(seq_html, unsafe_allow_html=True)
+                            st.caption("Red = predicted T-cell epitope hotspots")
                         else:
-                            seq_html += f'<span style="color:#666" title="Position {pos}">{aa}</span>'
-                        if pos % 60 == 0:
-                            seq_html += f' <span style="color:#999; font-size:0.8em">{pos}</span><br>'
-                    seq_html += "</div>"
-                    st.markdown(seq_html, unsafe_allow_html=True)
-                    st.caption("Red = predicted T-cell epitope hotspots")
-                else:
-                    # Plain sequence display
-                    formatted = "\n".join(
-                        parsed_seq[i:i + 60] + f"  {min(i + 60, len(parsed_seq))}"
-                        for i in range(0, len(parsed_seq), 60)
-                    )
-                    st.code(formatted)
+                            formatted = "\n".join(
+                                chain_seq[i:i + 60] + f"  {min(i + 60, len(chain_seq))}"
+                                for i in range(0, len(chain_seq), 60)
+                            )
+                            st.code(formatted)
 
-        with col_epitopes:
-            st.markdown("#### T-cell Epitope Prediction")
+                with col_ep:
+                    st.markdown("#### T-cell Epitopes")
 
-            # Run IEDB prediction
-            with st.spinner("Querying IEDB API..."):
-                epitope_results = predict_epitopes(parsed_seq)
+                    if ep_results:
+                        density = compute_epitope_density(ep_results, len(chain_seq))
+                        c1, c2 = st.columns(2)
+                        c1.metric("Density", f"{density:.1f}/100aa")
+                        c2.metric("Binders", len(ep_results))
 
-            if epitope_results:
-                density = compute_epitope_density(epitope_results, len(parsed_seq))
-                st.metric("Epitope Density", f"{density:.1f} per 100 residues")
-                st.metric("High-Affinity Binders", len(epitope_results))
+                        ep_df = pd.DataFrame([
+                            {
+                                "Position": f"{ep.start}-{ep.end}",
+                                "Peptide": ep.peptide,
+                                "Rank": round(ep.percentile_rank, 2),
+                                "Allele": ep.allele,
+                            }
+                            for ep in ep_results[:25]
+                        ])
+                        st.dataframe(ep_df, hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No epitope predictions (IEDB may be unreachable).")
 
-                ep_df = pd.DataFrame([
-                    {
-                        "Position": f"{ep.start}-{ep.end}",
-                        "Peptide": ep.peptide,
-                        "Rank": round(ep.percentile_rank, 2),
-                        "Allele": ep.allele,
-                    }
-                    for ep in epitope_results[:30]
-                ])
-                st.dataframe(ep_df, hide_index=True, use_container_width=True)
-            else:
-                st.info("No epitope predictions available (IEDB API may be unreachable).")
+                    # Alignment results for this chain
+                    if chain_name in chain_alignments and chain_alignments[chain_name]:
+                        st.markdown("#### Nearest Matches")
+                        for r in chain_alignments[chain_name][:3]:
+                            ada_str = f" (ADA: {drug_ada_map[r.inn_name]:.1f}%)" if r.inn_name in drug_ada_map else ""
+                            st.markdown(f"- **{r.inn_name}** {r.chain_descriptor}: {r.pct_identity:.0%}{ada_str}")
 
-            # Sequence diffs from closest match
-            if sequence_diffs:
-                st.markdown(f"#### Mutations vs. Closest Match ({len(sequence_diffs)} differences)")
-                diff_df = pd.DataFrame([
-                    {"Position": pos, "Query": q_aa, "Reference": r_aa}
-                    for pos, q_aa, r_aa in sequence_diffs[:30]
-                ])
-                st.dataframe(diff_df, hide_index=True, use_container_width=True)
+                    # Sequence diffs
+                    diffs = chain_diffs.get(chain_name, [])
+                    if diffs:
+                        st.markdown(f"#### Diffs vs. Closest ({len(diffs)})")
+                        st.dataframe(
+                            pd.DataFrame([{"Pos": p, "Query": q, "Ref": r} for p, q, r in diffs[:20]]),
+                            hide_index=True, use_container_width=True,
+                        )
+
+        # Cross-chain summary
+        if len(chains) > 1:
+            st.divider()
+            st.markdown("#### Cross-Chain Epitope Summary")
+            summary_rows = []
+            for name in chains:
+                eps = chain_epitopes.get(name, [])
+                summary_rows.append({
+                    "Chain": name,
+                    "Length (aa)": len(chains[name]),
+                    "Epitopes": len(eps),
+                    "Density (/100aa)": round(compute_epitope_density(eps, len(chains[name])), 1) if eps else 0,
+                    "Top Binder Rank": round(eps[0].percentile_rank, 2) if eps else "—",
+                })
+            st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
 
 # ==============================
-# PART 3 — Redesign Copilot
+# PART 3 — Redesign Copilot (per-chain)
 # ==============================
 with tab3:
     user_inputs = {
@@ -374,95 +405,153 @@ with tab3:
         "schedule": schedule,
     }
 
-    # --- Redesigned Sequences Section ---
-    if parsed_seq and epitope_results:
+    if chains and any(chain_epitopes.get(name) for name in chains):
         st.markdown("### Deimmunized Sequence Variants")
-        st.caption("Anchor residues in predicted T-cell epitopes are substituted with conservative alternatives to disrupt MHC-II binding.")
+        st.caption("Per-chain deimmunization: anchor residues in predicted T-cell epitopes are substituted to disrupt MHC-II binding.")
 
-        deimm_results = deimmunize_epitopes(parsed_seq, epitope_results)
-        variants = generate_redesigned_sequences(parsed_seq, deimm_results)
+        # Per-chain redesign tabs
+        redesign_chain_tabs = st.tabs(list(chains.keys()))
 
-        if variants:
-            # Mutation map overview
-            st.markdown("#### Mutation Map")
-            mut_df = pd.DataFrame([
-                {
-                    "Region": f"{dr.region_start}-{dr.region_end}",
-                    "Original": dr.original_peptide,
-                    "Modified": dr.modified_peptide,
-                    "Mutations": ", ".join(f"{o}{p}{n}" for p, o, n in dr.mutations),
-                    "Anchors": ", ".join(dr.anchor_positions_targeted),
-                    "Disruption": dr.expected_binding_disruption,
-                    "Allele": dr.allele,
-                    "Rank": dr.original_rank,
-                }
-                for dr in deimm_results
-            ])
-            st.dataframe(mut_df, hide_index=True, use_container_width=True)
+        # Collect all variants for combined FASTA download
+        all_chain_variants = {}  # {chain_name: [RedesignedSequence]}
 
-            st.divider()
+        for rtab, (chain_name, chain_seq) in zip(redesign_chain_tabs, chains.items()):
+            with rtab:
+                ep_results = chain_epitopes.get(chain_name, [])
+                if not ep_results:
+                    st.info(f"No epitope data for {chain_name} — skipping deimmunization.")
+                    continue
 
-            # Sequence variants
-            for i, var in enumerate(variants):
-                with st.expander(f"Variant {i+1}: {var.name} — {var.n_mutations} mutations", expanded=(i == 0)):
-                    st.markdown(f"**Strategy:** {var.strategy}")
+                deimm_results = deimmunize_epitopes(chain_seq, ep_results)
+                variants = generate_redesigned_sequences(chain_seq, deimm_results)
+                all_chain_variants[chain_name] = variants
 
-                    # Show mutations as a table
-                    var_mut_df = pd.DataFrame([
-                        {"Position": pos, "Original": orig, "New": new}
-                        for pos, orig, new in var.mutations
-                    ])
-                    st.dataframe(var_mut_df, hide_index=True)
+                if not variants:
+                    st.info(f"No actionable mutations found for {chain_name}.")
+                    continue
 
-                    # Show the sequence with mutations highlighted
-                    seq_html = '<div style="font-family:monospace; word-wrap:break-word; line-height:1.8; font-size:0.85em">'
-                    mut_positions = {pos for pos, _, _ in var.mutations}
-                    for j, aa in enumerate(var.sequence):
-                        pos = j + 1
-                        if pos in mut_positions:
-                            orig_aa = parsed_seq[j]
-                            seq_html += f'<span style="background:#2ecc71; color:white; padding:1px 3px; border-radius:2px; font-weight:bold" title="Pos {pos}: {orig_aa}→{aa}">{aa}</span>'
-                        else:
-                            seq_html += aa
-                        if pos % 60 == 0:
-                            seq_html += f' <span style="color:#999; font-size:0.8em">{pos}</span><br>'
-                    seq_html += "</div>"
-                    st.markdown(seq_html, unsafe_allow_html=True)
-                    st.caption("Green = mutated positions")
+                # Mutation map
+                st.markdown(f"#### Mutation Map — {chain_name}")
+                mut_df = pd.DataFrame([
+                    {
+                        "Region": f"{dr.region_start}-{dr.region_end}",
+                        "Original": dr.original_peptide,
+                        "Modified": dr.modified_peptide,
+                        "Mutations": ", ".join(f"{o}{p}{n}" for p, o, n in dr.mutations),
+                        "Anchors": ", ".join(dr.anchor_positions_targeted),
+                        "Disruption": dr.expected_binding_disruption,
+                        "Allele": dr.allele,
+                        "Rank": dr.original_rank,
+                    }
+                    for dr in deimm_results
+                ])
+                st.dataframe(mut_df, hide_index=True, use_container_width=True)
 
-                    # Copy-ready FASTA
-                    fasta = f">SafeBind_{var.name.replace(' ', '_')}|{var.n_mutations}_mutations\n"
-                    fasta += "\n".join(var.sequence[k:k+60] for k in range(0, len(var.sequence), 60))
+                st.divider()
 
-                    col_copy, col_dl = st.columns(2)
-                    with col_copy:
-                        st.code(fasta, language=None)
-                    with col_dl:
+                # Variant expanders
+                for i, var in enumerate(variants):
+                    with st.expander(f"Variant {i+1}: {var.name} — {var.n_mutations} mutations", expanded=(i == 0)):
+                        st.markdown(f"**Strategy:** {var.strategy}")
+
+                        var_mut_df = pd.DataFrame([
+                            {"Position": pos, "Original": orig, "New": new}
+                            for pos, orig, new in var.mutations
+                        ])
+                        st.dataframe(var_mut_df, hide_index=True)
+
+                        # Highlighted sequence
+                        seq_html = '<div style="font-family:monospace; word-wrap:break-word; line-height:1.8; font-size:0.85em">'
+                        mut_positions = {pos for pos, _, _ in var.mutations}
+                        for j, aa in enumerate(var.sequence):
+                            pos = j + 1
+                            if pos in mut_positions:
+                                orig_aa = chain_seq[j]
+                                seq_html += f'<span style="background:#2ecc71; color:white; padding:1px 3px; border-radius:2px; font-weight:bold" title="Pos {pos}: {orig_aa}→{aa}">{aa}</span>'
+                            else:
+                                seq_html += aa
+                            if pos % 60 == 0:
+                                seq_html += f' <span style="color:#999; font-size:0.8em">{pos}</span><br>'
+                        seq_html += "</div>"
+                        st.markdown(seq_html, unsafe_allow_html=True)
+                        st.caption("Green = mutated positions")
+
+                        # Per-chain FASTA
+                        safe_name = chain_name.replace(" ", "_")
+                        fasta = f">{safe_name}|{var.name.replace(' ', '_')}|{var.n_mutations}_mutations\n"
+                        fasta += "\n".join(var.sequence[k:k+60] for k in range(0, len(var.sequence), 60))
+
                         st.download_button(
-                            f"Download FASTA",
+                            f"Download {chain_name} FASTA",
                             fasta,
-                            f"safebind_variant_{i+1}.fasta",
+                            f"safebind_{safe_name}_variant_{i+1}.fasta",
                             mime="text/plain",
-                            key=f"dl_var_{i}",
+                            key=f"dl_{safe_name}_{i}",
                         )
-        else:
-            st.info("Could not generate deimmunized variants — no actionable epitope mutations found.")
 
-    elif parsed_seq and not epitope_results:
+        # Combined multi-chain FASTA download (one variant level across all chains)
+        if len(chains) > 1 and all_chain_variants:
+            st.divider()
+            st.markdown("### Download Combined Multi-Chain FASTA")
+            st.caption("Downloads all chains at the selected deimmunization level in a single FASTA file.")
+
+            # Find which variant levels are available across all chains
+            variant_levels = ["Conservative", "Moderate", "Aggressive"]
+            for level in variant_levels:
+                combined_fasta = ""
+                chain_count = 0
+                for cname, variants in all_chain_variants.items():
+                    for var in variants:
+                        if level.lower() in var.name.lower():
+                            safe_name = cname.replace(" ", "_")
+                            combined_fasta += f">{safe_name}|{var.name.replace(' ', '_')}|{var.n_mutations}_mutations\n"
+                            combined_fasta += "\n".join(var.sequence[k:k+60] for k in range(0, len(var.sequence), 60))
+                            combined_fasta += "\n"
+                            chain_count += 1
+                            break
+                    else:
+                        # No variant at this level — use original
+                        safe_name = cname.replace(" ", "_")
+                        combined_fasta += f">{safe_name}|original\n"
+                        combined_fasta += "\n".join(chains[cname][k:k+60] for k in range(0, len(chains[cname]), 60))
+                        combined_fasta += "\n"
+                        chain_count += 1
+
+                if combined_fasta:
+                    st.download_button(
+                        f"Download {level} — All {chain_count} Chains",
+                        combined_fasta,
+                        f"safebind_all_chains_{level.lower()}.fasta",
+                        mime="text/plain",
+                        key=f"dl_combined_{level}",
+                    )
+
+    elif chains:
         st.info("Waiting for epitope predictions (IEDB API) to generate redesigned sequences.")
     else:
         st.info("Provide a protein sequence in the sidebar to generate deimmunized variants.")
 
     st.divider()
 
-    # --- AI Risk Memo Section ---
+    # --- AI Risk Memo ---
     st.markdown("### AI Risk Memo")
+
+    # Flatten epitope + diff data for the memo
+    all_epitopes = []
+    all_diffs = []
+    for name in chains:
+        for ep in chain_epitopes.get(name, []):
+            ep_copy = type(ep)(start=ep.start, end=ep.end, peptide=ep.peptide,
+                              percentile_rank=ep.percentile_rank, allele=f"[{name}] {ep.allele}")
+            all_epitopes.append(ep_copy)
+        for pos, q, r in chain_diffs.get(name, []):
+            all_diffs.append((pos, q, r))
 
     memo = generate_risk_memo(
         risk_result=risk_result,
         user_inputs=user_inputs,
-        sequence_diffs=sequence_diffs,
-        epitope_results=epitope_results,
+        sequence_diffs=all_diffs if all_diffs else None,
+        epitope_results=all_epitopes if all_epitopes else None,
     )
 
     st.markdown(memo)

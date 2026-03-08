@@ -35,20 +35,77 @@ class EpitopeResult:
     allele: str
 
 
-def parse_fasta(text: str) -> str:
-    """Parse raw sequence or FASTA format. Validate amino acid alphabet."""
-    lines = text.strip().split("\n")
-    seq_lines = [l.strip() for l in lines if not l.startswith(">")]
-    seq = "".join(seq_lines)
-    # Remove whitespace, numbers, dashes
+def _clean_seq(seq: str) -> str:
+    """Remove whitespace, numbers, dashes and validate."""
     seq = re.sub(r"[\s\d\-]", "", seq).upper()
-    # Validate
     invalid = set(seq) - AMINO_ACIDS
     if invalid:
         raise ValueError(f"Invalid amino acid characters: {', '.join(sorted(invalid))}")
     if len(seq) < 10:
-        raise ValueError("Sequence too short (minimum 10 residues)")
+        raise ValueError(f"Sequence too short ({len(seq)} residues, minimum 10)")
     return seq
+
+
+def parse_fasta(text: str) -> str:
+    """Parse raw sequence or FASTA format (single chain). Validate amino acid alphabet."""
+    lines = text.strip().split("\n")
+    seq_lines = [l.strip() for l in lines if not l.startswith(">")]
+    seq = "".join(seq_lines)
+    return _clean_seq(seq)
+
+
+def parse_multi_fasta(text: str) -> dict[str, str]:
+    """Parse multi-chain FASTA input.
+
+    Supports:
+        - Multiple FASTA entries with >headers
+        - Single raw sequence (returned as {"Chain 1": seq})
+
+    Returns:
+        dict of {chain_name: sequence}
+    """
+    text = text.strip()
+    if not text:
+        return {}
+
+    lines = text.split("\n")
+
+    # Check if any FASTA headers exist
+    has_headers = any(l.strip().startswith(">") for l in lines)
+
+    if not has_headers:
+        # Single raw sequence
+        seq = _clean_seq("".join(l.strip() for l in lines))
+        return {"Chain 1": seq}
+
+    # Parse multi-FASTA
+    chains = {}
+    current_name = None
+    current_lines = []
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith(">"):
+            # Save previous chain
+            if current_name and current_lines:
+                chains[current_name] = _clean_seq("".join(current_lines))
+            # Start new chain
+            current_name = line[1:].strip()
+            # Clean up common prefixes
+            if not current_name:
+                current_name = f"Chain {len(chains) + 1}"
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    # Save last chain
+    if current_name and current_lines:
+        chains[current_name] = _clean_seq("".join(current_lines))
+
+    if not chains:
+        raise ValueError("No valid sequences found in input")
+
+    return chains
 
 
 def _get_kmers(seq: str, k: int = KMER_SIZE) -> set:
