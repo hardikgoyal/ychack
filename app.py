@@ -174,7 +174,7 @@ st.markdown("""
         background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
         padding: 14px 18px; margin-bottom: 10px;
     }
-    .hotspot-seq { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #0891b2; }
+    .hotspot-seq { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #374151; word-break: break-all; }
 
     /* Disclaimer */
     .disclaimer {
@@ -951,9 +951,9 @@ def render_results(report, seq_clean, seq_name, pdb_id):
                     </div>
                     <div class="hotspot-seq" style="margin-top:8px;">{hs['sequence']}</div>
                     <div style="display:flex;gap:24px;margin-top:8px;font-size:12px;">
-                        <span style="color:#6b7280;">T-cell:</span> <span style="color:#ea580c;font-weight:600;">{hs['avg_t_cell']:.0%}</span>
-                        <span style="color:#6b7280;margin-left:8px;">B-cell:</span> <span style="color:#0891b2;font-weight:600;">{hs['avg_b_cell']:.0%}</span>
-                        <span style="color:#6b7280;margin-left:8px;">Max:</span> <span style="color:#dc2626;font-weight:600;">{hs['max_risk']:.0%}</span>
+                        <span style="font-weight:600;color:#ea580c;">T-cell: {hs['avg_t_cell']:.0%}</span>
+                        <span style="font-weight:600;color:#059669;">B-cell: {hs['avg_b_cell']:.0%}</span>
+                        <span style="font-weight:600;color:#dc2626;">Max: {hs['max_risk']:.0%}</span>
                     </div></div>""", unsafe_allow_html=True)
         else:
             st.success("No significant T-cell hotspot regions detected above threshold.")
