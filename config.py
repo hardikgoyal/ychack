@@ -201,3 +201,26 @@ IEDB_EPITOPE_PERCENTILE_CUTOFF = 10  # Top binders below this percentile
 
 # Valid amino acid alphabet
 AMINO_ACIDS = set("ACDEFGHIKLMNPQRSTVWXY")
+
+# IEDB B-cell epitope API
+IEDB_BCELL_API_URL = "https://tools-cluster-interface.iedb.org/tools_api/bcell/"
+
+# CDR definitions — Kabat numbering for heavy and light chains
+CDR_DEFINITIONS = {
+    "heavy": {
+        "CDR-H1": (31, 35),   # Kabat: 31-35 (can extend to 35B)
+        "CDR-H2": (50, 65),   # Kabat: 50-65
+        "CDR-H3": (95, 102),  # Kabat: 95-102
+    },
+    "light": {
+        "CDR-L1": (24, 34),   # Kabat: 24-34
+        "CDR-L2": (50, 56),   # Kabat: 50-56
+        "CDR-L3": (89, 97),   # Kabat: 89-97
+    },
+}
+
+# Common CDR anchor motifs for motif-based detection
+CDR_MOTIFS = {
+    "CDR-H3": ["CAR", "CAK", "CTR"],  # Common H3 anchors
+    "CDR-L3": ["CQQ", "CQH", "CQY"],  # Common L3 anchors
+}

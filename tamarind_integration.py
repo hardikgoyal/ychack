@@ -163,30 +163,156 @@ def _make_job_name(prefix: str) -> str:
     return f"safebind-{prefix}-{h}"
 
 
-@st.cache_data(show_spinner="Folding protein with ESMFold...", ttl=3600)
-def fold_protein(sequence: str, api_key: str) -> str | None:
-    """Fold a protein sequence using Tamarind Bio ESMFold.
+def submit_fold_job(sequence: str, api_key: str) -> str | None:
+    """Submit a structure prediction job to Tamarind Bio (non-blocking).
+
+    Tries AlphaFold2 first, falls back to ESMFold.
 
     Args:
-        sequence: Amino acid sequence (truncated to 1000 residues)
+        sequence: Amino acid sequence
+        api_key: Tamarind Bio API key
+
+    Returns:
+        Job name string on success, or None on failure
+    """
+    if not api_key:
+        return None
+
+    seq = sequence[:1000]
+    job_name = _make_job_name("fold")
+
+    candidates = [
+        ("alphafold", {"sequence": seq, "useMSA": False,
+                       "numModels": "1", "numRecycles": 1}),
+        ("esmfold", {"sequence": seq}),
+    ]
+    for tool_type, settings in candidates:
+        try:
+            resp = requests.post(
+                f"{BASE_URL}/submit-job",
+                json={
+                    "jobName": job_name,
+                    "type": tool_type,
+                    "settings": settings,
+                },
+                headers=_headers(api_key),
+                timeout=20,
+            )
+            if resp.status_code == 200:
+                return job_name
+        except requests.exceptions.RequestException:
+            continue
+    return None
+
+
+def check_fold_status(job_name: str, api_key: str) -> str:
+    """Check the status of a Tamarind fold job.
+
+    Returns:
+        One of "running", "complete", "failed", or "not_found"
+    """
+    if not api_key:
+        return "not_found"
+
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/jobs",
+            params={"jobName": job_name},
+            headers=_headers(api_key),
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return "not_found"
+
+        data = resp.json()
+        if not isinstance(data, dict):
+            return "not_found"
+
+        # Find the job dict — response can be:
+        #   {"0": {job}, "statuses": ...}  (when queried by jobName)
+        #   {"jobs": [job, ...], "statuses": ...}  (listing all)
+        #   {job fields directly: "JobName", "JobStatus", ...}
+        job = None
+        if "JobStatus" in data:
+            job = data
+        elif "jobs" in data and isinstance(data["jobs"], list):
+            for j in data["jobs"]:
+                if j.get("JobName") == job_name:
+                    job = j
+                    break
+        else:
+            # Numbered keys: {"0": {job}, "1": {job}, "statuses": ...}
+            for key, val in data.items():
+                if isinstance(val, dict) and val.get("JobName") == job_name:
+                    job = val
+                    break
+
+        if not job:
+            return "not_found"
+
+        status = str(job.get("JobStatus") or job.get("status", "")).lower()
+        if any(s in status for s in ["complete", "done", "success", "finish"]):
+            return "complete"
+        if any(s in status for s in ["fail", "error", "cancel", "stop"]):
+            return "failed"
+        return "running"
+
+    except requests.exceptions.RequestException:
+        return "not_found"
+
+
+def fetch_fold_result(job_name: str, api_key: str) -> str | None:
+    """Download PDB result from a completed Tamarind fold job.
+
+    Args:
+        job_name: The Tamarind job name
         api_key: Tamarind Bio API key
 
     Returns:
         PDB format string, or None on failure
     """
-    seq = sequence[:1000]  # ESMFold limit
-    job_name = _make_job_name("esmfold")
+    if not api_key:
+        return None
 
     try:
-        _submit_job(job_name, "esmfold", {"sequence": seq}, api_key)
-        _poll_job(job_name, api_key)
         url = _get_result_url(job_name, api_key)
         result_bytes = _download_result(url)
-        pdb_data = _extract_pdb_from_result(result_bytes)
-        return pdb_data
-    except Exception as e:
-        st.warning(f"ESMFold failed: {e}")
+        return _extract_pdb_from_result(result_bytes)
+    except Exception:
         return None
+
+
+@st.cache_data(show_spinner="Folding protein with AlphaFold2...", ttl=3600)
+def fold_protein(sequence: str, api_key: str) -> str | None:
+    """Fold a protein sequence using Tamarind Bio (AlphaFold2, ESMFold fallback).
+
+    Args:
+        sequence: Amino acid sequence
+        api_key: Tamarind Bio API key
+
+    Returns:
+        PDB format string, or None on failure
+    """
+    seq = sequence[:1000]
+
+    candidates = [
+        ("alphafold", {"sequence": seq, "useMSA": False, "numModels": "1", "numRecycles": 1}),
+        ("esmfold", {"sequence": seq}),
+    ]
+    for tool_type, settings in candidates:
+        job_name = _make_job_name(tool_type)
+        try:
+            _submit_job(job_name, tool_type, settings, api_key)
+            _poll_job(job_name, api_key)
+            url = _get_result_url(job_name, api_key)
+            result_bytes = _download_result(url)
+            pdb_data = _extract_pdb_from_result(result_bytes)
+            if pdb_data:
+                return pdb_data
+        except Exception as e:
+            st.warning(f"{tool_type} failed: {e}")
+            continue
+    return None
 
 
 def suggest_redesigns(
