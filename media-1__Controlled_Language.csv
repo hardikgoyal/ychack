@@ -1,0 +1,16 @@
+Therapeutics Table,,,,,,,,,,,Sequence Table,,,Clinical Trial Table,,,,,
+Labeled as Biosimilar?,Protein Modality,Species,Antibody Backbone,Light Chain,Conjugate Modification,Expression System,Sequence Verified?,Furthest Development Stage Reached,FDA approved,EU approval ,Chain multiplicity,Chain ID,Chain Descriptor,Trial External Source,Therapeutic Exposure Status,Disease Indication  Category,Therapeutic Route of Administration,ADA interpreted to impact PK,ADA interpreted to impact Efficacy
+Yes,All Other Multispecifics,Bacterial,Human Fab (CH1 IgG1),Kappa,Unconjugated,E. coli bacteria,Yes,Approval,Yes,Yes,1,A,Heavy Chain 1,Clinicaltrials.gov,Therapeutic Naive,Blood Disorders,Subcutaneous,Yes,Yes
+No,Antibody Fragments,Camelid,Human IgG1,Lambda,Drug Conjugate,Chinese hamster ovary (CHO) cells,No,Phase 0,No,No,2,B,Heavy Chain 2,Journal Article,Therapeutic Exposed,Cancer and neoplasms,Intravenous,No,No
+,Antibody-drug Conjugate,Chimeric,Human IgG2,Not Applicable,Not Applicable,Undetermined,,Phase I,,,4,,Light Chain 1,FDA Label,,Cardiovascular,Oral,Not reported,Not reported
+,Blood Clotting Factors,Goat,Human IgG2(CH1-hinge)/IgG4(CH2-CH3),kappa and lambda,PEG Conjugate,Murine myeloma cells,,Phase II,,,,,Light Chain 2,EU Clinical Trials Register,,Infectious diseases,Ophthalmic,,
+,Cytokine,Guinea Pig,Human IgG4,,Radioisotope Conjugate,Pichia pastoris yeast cells,,Phase III,,,,,Domain 1,,,Inflammation and autoimmunity,Intramuscular,,
+,Enzyme,Horse,Murine IgG1,,Lipid Conjugate,Erwinia chrysanthemi,,Phase IV,,,,,Domain 2,,,Metobolic and endocrine disorders,Other,,
+,Fc-Fusion,Human,Murine IgG2,,,Murine hybridoma,,Preclinical,,,,,Domain 3,,,Musculoskeletal,,,
+,Hormone and Growth Factors,Humanized,Not Applicable,,,,,,,,,,,,,Neurological,,,
+,IgG-like Bispecific,Mouse,ScFv,,,,,,,,,,,,,Renal and urogenital,,,
+,Immunotoxin,Rabbit,VHH,,,,,,,,,,,,,Reproductive health,,,
+,Monoclonal Antibody,Shark,,,,,,,,,,,,,,Non-inflammatory respiratory diseases,,,
+,Peptide,Viral,,,,,,,,,,,,,,Non-inflammatory skin diseases,,,
+,Single-Domain Antibody,,,,,,,,,,,,,,,Healthy Volunteer,,,
+,,,,,,,,,,,,,,,,Unspecified,,,
