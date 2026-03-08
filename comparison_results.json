@@ -1,0 +1,156 @@
+{
+  "Bococizumab": {
+    "overall_risk": 0.6531347826086956,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 2,
+    "hotspots": [
+      {
+        "start": 15,
+        "end": 59,
+        "sequence": "GASVKVSCKASGYTFTSYYMHWVRQAPGQGLEWMGEISPFGGRTN",
+        "length": 45,
+        "avg_risk": 0.545,
+        "max_risk": 0.678,
+        "avg_t_cell": 0.535,
+        "avg_b_cell": 0.567
+      },
+      {
+        "start": 66,
+        "end": 105,
+        "sequence": "SRVTMTRDTSTSTVYMELSSLRSEDTAVYYCARERPLYAS",
+        "length": 40,
+        "avg_risk": 0.56,
+        "max_risk": 0.741,
+        "avg_t_cell": 0.588,
+        "avg_b_cell": 0.493
+      }
+    ],
+    "n_strong_binders": 65,
+    "n_bcell_epitopes": 8,
+    "species": "Humanized",
+    "note": "Pfizer PCSK9 inhibitor - TERMINATED due to 44% ADA, 27% neutralizing. $1B+ loss."
+  },
+  "Adalimumab": {
+    "overall_risk": 0.7794666666666666,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 3,
+    "hotspots": [
+      {
+        "start": 6,
+        "end": 30,
+        "sequence": "ESGGGLVQPGRSLRLSCAASGFTFD",
+        "length": 25,
+        "avg_risk": 0.646,
+        "max_risk": 0.782,
+        "avg_t_cell": 0.687,
+        "avg_b_cell": 0.55
+      },
+      {
+        "start": 42,
+        "end": 60,
+        "sequence": "GKGLEWVSAITWNSGHIDY",
+        "length": 19,
+        "avg_risk": 0.526,
+        "max_risk": 0.628,
+        "avg_t_cell": 0.499,
+        "avg_b_cell": 0.59
+      },
+      {
+        "start": 65,
+        "end": 113,
+        "sequence": "EGRFTISRDNAKNSLYLQMNSLRAEDTAVYYCAKVSYLSTASSLDYWGQ",
+        "length": 49,
+        "avg_risk": 0.682,
+        "max_risk": 0.844,
+        "avg_t_cell": 0.773,
+        "avg_b_cell": 0.47
+      }
+    ],
+    "n_strong_binders": 143,
+    "n_bcell_epitopes": 6,
+    "species": "Human",
+    "note": "Humira - world's best-selling drug. ADA rates 30-93% across trials. Still effective in most patients."
+  },
+  "Trastuzumab": {
+    "overall_risk": 0.6246958333333333,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 4,
+    "hotspots": [
+      {
+        "start": 7,
+        "end": 30,
+        "sequence": "SGGGLVQPGGSLRLSCAASGFNIK",
+        "length": 24,
+        "avg_risk": 0.515,
+        "max_risk": 0.612,
+        "avg_t_cell": 0.524,
+        "avg_b_cell": 0.496
+      },
+      {
+        "start": 35,
+        "end": 46,
+        "sequence": "HWVRQAPGKGLE",
+        "length": 12,
+        "avg_risk": 0.504,
+        "max_risk": 0.625,
+        "avg_t_cell": 0.486,
+        "avg_b_cell": 0.548
+      },
+      {
+        "start": 51,
+        "end": 61,
+        "sequence": "IYPTNGYTRYA",
+        "length": 11,
+        "avg_risk": 0.52,
+        "max_risk": 0.576,
+        "avg_t_cell": 0.445,
+        "avg_b_cell": 0.695
+      },
+      {
+        "start": 65,
+        "end": 94,
+        "sequence": "KGRFTISADTSKNTAYLQMNSLRAEDTAVY",
+        "length": 30,
+        "avg_risk": 0.567,
+        "max_risk": 0.705,
+        "avg_t_cell": 0.603,
+        "avg_b_cell": 0.484
+      }
+    ],
+    "n_strong_binders": 52,
+    "n_bcell_epitopes": 8,
+    "species": "Humanized",
+    "note": "Herceptin - HER2+ breast cancer. Low ADA rates (0-14%). Well-tolerated."
+  },
+  "Nivolumab": {
+    "overall_risk": 0.7475772727272727,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 2,
+    "hotspots": [
+      {
+        "start": 6,
+        "end": 41,
+        "sequence": "ESGGGVVQPGRSLRLDCKASGITFSNSGMHWVRQAP",
+        "length": 36,
+        "avg_risk": 0.597,
+        "max_risk": 0.724,
+        "avg_t_cell": 0.584,
+        "avg_b_cell": 0.626
+      },
+      {
+        "start": 45,
+        "end": 97,
+        "sequence": "LEWVAVIWYDGSKRYYADSVKGRFTISRDNSKNTLFLQMNSLRAEDTAVYYCA",
+        "length": 53,
+        "avg_risk": 0.619,
+        "max_risk": 0.883,
+        "avg_t_cell": 0.668,
+        "avg_b_cell": 0.505
+      }
+    ],
+    "n_strong_binders": 103,
+    "n_bcell_epitopes": 7,
+    "species": "Human",
+    "note": "Opdivo - PD-1 checkpoint inhibitor. ADA rates 11-26%."
+  }
+}

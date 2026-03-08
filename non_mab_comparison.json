@@ -1,0 +1,180 @@
+{
+  "AAV9 Capsid VP1 (Gene Therapy)": {
+    "overall_risk": 0.48299677419354836,
+    "risk_category": "HIGH",
+    "n_hotspots": 4,
+    "hotspots": [
+      {
+        "start": 50,
+        "end": 63,
+        "sequence": "YKYLGPFNGLDKGE",
+        "length": 14,
+        "avg_risk": 0.465,
+        "max_risk": 0.508,
+        "avg_t_cell": 0.515,
+        "avg_b_cell": 0.35
+      },
+      {
+        "start": 76,
+        "end": 84,
+        "sequence": "DKAYDQQLK",
+        "length": 9,
+        "avg_risk": 0.418,
+        "max_risk": 0.451,
+        "avg_t_cell": 0.43,
+        "avg_b_cell": 0.388
+      },
+      {
+        "start": 89,
+        "end": 104,
+        "sequence": "PYLKYNHADAEFQERL",
+        "length": 16,
+        "avg_risk": 0.419,
+        "max_risk": 0.445,
+        "avg_t_cell": 0.463,
+        "avg_b_cell": 0.316
+      },
+      {
+        "start": 112,
+        "end": 131,
+        "sequence": "GNLGRAVFQAKKRLLEPLGL",
+        "length": 20,
+        "avg_risk": 0.485,
+        "max_risk": 0.537,
+        "avg_t_cell": 0.632,
+        "avg_b_cell": 0.14
+      }
+    ],
+    "n_strong_binders": 32,
+    "n_bcell_epitopes": 12,
+    "species": "Viral",
+    "note": "AAV9 capsid - used in SGT-001 (Duchenne, FDA hold), NGN-401 (Rett, SAE). 30-60% pre-existing immunity.",
+    "seq_len": 157
+  },
+  "Alglucosidase alfa (Pompe ERT)": {
+    "overall_risk": 0.5842307692307692,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 2,
+    "hotspots": [
+      {
+        "start": 62,
+        "end": 98,
+        "sequence": "PSYPSYKLENLSSSEMGYTATLTRTTPTFFPKDILTL",
+        "length": 37,
+        "avg_risk": 0.526,
+        "max_risk": 0.594,
+        "avg_t_cell": 0.505,
+        "avg_b_cell": 0.574
+      },
+      {
+        "start": 101,
+        "end": 126,
+        "sequence": "DVMMETENRLHFTIKDPANRRYEVPL",
+        "length": 26,
+        "avg_risk": 0.554,
+        "max_risk": 0.644,
+        "avg_t_cell": 0.57,
+        "avg_b_cell": 0.516
+      }
+    ],
+    "n_strong_binders": 37,
+    "n_bcell_epitopes": 9,
+    "species": "Human",
+    "note": "Myozyme/Lumizyme - Pompe disease ERT. CRIM-negative patients: ~100% ADA, fatal without immune tolerance.",
+    "seq_len": 130
+  },
+  "Blinatumomab (BiTE Bispecific)": {
+    "overall_risk": 0.5617076923076924,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 4,
+    "hotspots": [
+      {
+        "start": 2,
+        "end": 23,
+        "sequence": "IQLTQSPASLAVSLGQRATISC",
+        "length": 22,
+        "avg_risk": 0.501,
+        "max_risk": 0.583,
+        "avg_t_cell": 0.578,
+        "avg_b_cell": 0.321
+      },
+      {
+        "start": 42,
+        "end": 64,
+        "sequence": "QIPGQPPKLLIYDASNLVSGIPP",
+        "length": 23,
+        "avg_risk": 0.55,
+        "max_risk": 0.601,
+        "avg_t_cell": 0.62,
+        "avg_b_cell": 0.385
+      },
+      {
+        "start": 71,
+        "end": 76,
+        "sequence": "SGTDFT",
+        "length": 6,
+        "avg_risk": 0.458,
+        "max_risk": 0.507,
+        "avg_t_cell": 0.447,
+        "avg_b_cell": 0.484
+      },
+      {
+        "start": 82,
+        "end": 90,
+        "sequence": "VEKVDAATY",
+        "length": 9,
+        "avg_risk": 0.437,
+        "max_risk": 0.469,
+        "avg_t_cell": 0.459,
+        "avg_b_cell": 0.385
+      }
+    ],
+    "n_strong_binders": 47,
+    "n_bcell_epitopes": 8,
+    "species": "Mouse",
+    "note": "Blincyto - first approved BiTE (CD19\u00d7CD3). ADA rates 1-2% (low due to B-cell depletion MOA).",
+    "seq_len": 130
+  },
+  "Agalsidase beta (Fabry ERT)": {
+    "overall_risk": 0.7051615384615384,
+    "risk_category": "VERY HIGH",
+    "n_hotspots": 3,
+    "hotspots": [
+      {
+        "start": 32,
+        "end": 36,
+        "sequence": "CISEK",
+        "length": 5,
+        "avg_risk": 0.466,
+        "max_risk": 0.545,
+        "avg_t_cell": 0.48,
+        "avg_b_cell": 0.435
+      },
+      {
+        "start": 43,
+        "end": 50,
+        "sequence": "ELMVSEGW",
+        "length": 8,
+        "avg_risk": 0.48,
+        "max_risk": 0.534,
+        "avg_t_cell": 0.483,
+        "avg_b_cell": 0.471
+      },
+      {
+        "start": 72,
+        "end": 114,
+        "sequence": "EGRLQADPQRFPHGIRQLANYVHSKGLKLGIYADVGNKTCAGF",
+        "length": 43,
+        "avg_risk": 0.642,
+        "max_risk": 0.819,
+        "avg_t_cell": 0.662,
+        "avg_b_cell": 0.597
+      }
+    ],
+    "n_strong_binders": 69,
+    "n_bcell_epitopes": 7,
+    "species": "Human",
+    "note": "Fabrazyme - Fabry disease ERT. ~40% of classical males develop neutralizing ADAs.",
+    "seq_len": 130
+  }
+}
