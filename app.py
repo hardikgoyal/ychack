@@ -140,6 +140,107 @@ from tamarind_integration import (
     fold_protein, suggest_redesigns, _get_api_key,
     submit_fold_job, check_fold_status, fetch_fold_result,
 )
+from safebind_downselect import render_downselect_tab
+import streamlit.components.v1 as components
+
+
+# ── Adapter for downselect module ──
+# Wraps existing functions to match the expected interface
+class MockReport:
+    """Adapter to wrap this branch's results into the expected report format."""
+    def __init__(self, overall_risk_score, t_cell_epitopes, b_cell_epitopes, hotspot_regions, risk_category, residue_risks=None):
+        self.overall_risk_score = overall_risk_score
+        self.t_cell_epitopes = t_cell_epitopes
+        self.b_cell_epitopes = b_cell_epitopes
+        self.hotspot_regions = hotspot_regions
+        self.risk_category = risk_category
+        self.residue_risks = residue_risks or []
+
+class MockEpitope:
+    """Mock epitope with rank attribute for compatibility."""
+    def __init__(self, rank, start=0, end=0, sequence=""):
+        self.rank = rank
+        self.start = start
+        self.end = end
+        self.sequence = sequence
+
+def run_immunogenicity_assessment_adapter(
+    sequence, name="Query", pdb_id=None, pdb_chain="A",
+    idc_data_path=None, species="Humanized", modality="Monoclonal antibody", verbose=False
+):
+    """Adapter function that wraps this branch's prediction functions."""
+    # Predict T-cell epitopes
+    from sequence_engine import predict_epitopes, predict_bcell_epitopes, compute_epitope_density
+    
+    t_cell_raw = predict_epitopes(sequence)
+    t_cell_epitopes = [
+        MockEpitope(rank=ep.rank_percentile if hasattr(ep, 'rank_percentile') else ep.rank if hasattr(ep, 'rank') else 5, 
+                    start=ep.position if hasattr(ep, 'position') else 0,
+                    sequence=ep.peptide if hasattr(ep, 'peptide') else "")
+        for ep in t_cell_raw
+    ]
+    
+    # Predict B-cell epitopes
+    b_cell_epitopes = predict_bcell_epitopes(sequence)
+    
+    # Calculate epitope density as risk score
+    epitope_density = compute_epitope_density(t_cell_raw, len(sequence))
+    overall_risk = min(1.0, epitope_density / 50)  # Normalize: 50 epitopes/100aa = 100% risk
+    
+    # Identify hotspot regions (clusters of epitopes)
+    hotspot_regions = []
+    if t_cell_raw:
+        # Simple clustering: find regions with multiple epitopes
+        positions = sorted(set(ep.position if hasattr(ep, 'position') else 0 for ep in t_cell_raw))
+        if positions:
+            current_start = positions[0]
+            current_end = positions[0]
+            for pos in positions[1:]:
+                if pos <= current_end + 20:  # within 20aa
+                    current_end = pos + 15
+                else:
+                    if current_end - current_start >= 15:
+                        hotspot_regions.append({
+                            "start": current_start,
+                            "end": current_end,
+                            "length": current_end - current_start,
+                            "sequence": sequence[current_start:current_end],
+                            "avg_risk": overall_risk,
+                            "avg_t_cell": overall_risk,
+                            "avg_b_cell": 0.3,
+                            "max_risk": overall_risk,
+                        })
+                    current_start = pos
+                    current_end = pos + 15
+            if current_end - current_start >= 15:
+                hotspot_regions.append({
+                    "start": current_start,
+                    "end": min(current_end, len(sequence)),
+                    "length": min(current_end, len(sequence)) - current_start,
+                    "sequence": sequence[current_start:min(current_end, len(sequence))],
+                    "avg_risk": overall_risk,
+                    "avg_t_cell": overall_risk,
+                    "avg_b_cell": 0.3,
+                    "max_risk": overall_risk,
+                })
+    
+    # Risk category
+    if overall_risk >= 0.6:
+        risk_category = "VERY HIGH"
+    elif overall_risk >= 0.4:
+        risk_category = "HIGH"
+    elif overall_risk >= 0.2:
+        risk_category = "MODERATE"
+    else:
+        risk_category = "LOW"
+    
+    return MockReport(
+        overall_risk_score=overall_risk,
+        t_cell_epitopes=t_cell_epitopes,
+        b_cell_epitopes=b_cell_epitopes,
+        hotspot_regions=hotspot_regions,
+        risk_category=risk_category,
+    )
 
 st.set_page_config(
     page_title="SafeBind Risk",
@@ -353,13 +454,14 @@ for chain_name, results in chain_alignments.items():
 # ==============================
 st.markdown("## SafeBind Risk Assessment")
 
-tab1, tab2, tab_bcell, tab_mhc1, tab_composite, tab3 = st.tabs([
+tab1, tab2, tab_bcell, tab_mhc1, tab_composite, tab3, tab_ds = st.tabs([
     "Prediction",
     "Structure",
     "B-cell Epitopes",
     "Cytotoxic (MHC-I)",
     "Composite Score",
     "Redesign",
+    "Downselect",
 ])
 
 with tab1:
@@ -1383,4 +1485,27 @@ with tab3:
         memo,
         "safebind_risk_memo.md",
         mime="text/markdown",
+    )
+
+# ══════════════════════════════════════════════════════════════
+# TAB: DOWNSELECT — Batch Immunogenicity Comparison
+# ══════════════════════════════════════════════════════════════
+with tab_ds:
+    # Build preloaded sequences dict from DRUG_PRESETS
+    preloaded_for_ds = {}
+    for name, preset in DRUG_PRESETS.items():
+        if preset.get("sequence") and name != "Custom":
+            preloaded_for_ds[name] = {
+                "seq": preset["sequence"],
+                "species": preset.get("species", "Humanized"),
+            }
+    
+    render_downselect_tab(
+        st_module=st,
+        components_module=components,
+        run_immunogenicity_fn=run_immunogenicity_assessment_adapter,
+        run_tolerance_fn=run_tolerance_analysis,
+        run_cytotoxic_fn=run_cytotoxic_assessment,
+        preloaded_sequences=preloaded_for_ds,
+        idc_data_path="media-1__Clinical_Trial.csv",
     )

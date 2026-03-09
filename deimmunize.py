@@ -9,7 +9,6 @@ regulatory T-cell (Treg) epitopes via TCR-facing residue humanness scoring
 and known Tregitope matching.  Treg-containing regions are preserved during
 deimmunization to maintain natural immune tolerance.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field

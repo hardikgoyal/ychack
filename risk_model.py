@@ -1,4 +1,5 @@
 """SafeBind Risk — Composite ADA risk scoring engine."""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from config import (

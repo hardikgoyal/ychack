@@ -1,4 +1,5 @@
 """SafeBind Risk — Sequence alignment, epitope prediction, and structural analysis."""
+from __future__ import annotations
 
 import re
 import requests

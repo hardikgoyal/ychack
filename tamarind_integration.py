@@ -7,6 +7,7 @@ Uses the Tamarind Bio REST API:
 API docs: https://docs.tamarind.bio
 Requires TAMARIND_API_KEY set in environment or Streamlit secrets.
 """
+from __future__ import annotations
 
 import io
 import json
