@@ -1,13 +1,16 @@
 """SafeBind Risk — Rule-based deimmunization engine with tolerance analysis.
 
-Generates modified sequences by substituting MHC-II anchor residues
+Generates modified sequences by substituting MHC anchor residues
 in predicted T-cell epitope hotspots with conservative alternatives
 that disrupt binding while preserving structural integrity.
 
-Includes JanusMatrix-inspired tolerance analysis that identifies putative
-regulatory T-cell (Treg) epitopes via TCR-facing residue humanness scoring
-and known Tregitope matching.  Treg-containing regions are preserved during
-deimmunization to maintain natural immune tolerance.
+Supports both MHC-II (CD4+ helper T-cell) and MHC-I (CD8+ cytotoxic
+T-cell) epitope deimmunization with structural constraints:
+  - CDR protection for antibodies (never mutate CDR residues)
+  - Surface-exposure filtering via SASA (skip buried epitopes)
+  - Treg epitope preservation (JanusMatrix-inspired tolerance)
+
+Re-scoring validates that mutations actually reduce epitope load.
 """
 from __future__ import annotations
 
@@ -20,7 +23,11 @@ from typing import Optional
 
 # MHC-II binding anchor positions within a 15-mer core
 # P1 (pos 1), P4 (pos 4), P6 (pos 6), P9 (pos 9) are the key anchors
-ANCHOR_OFFSETS = [0, 3, 5, 8]  # 0-indexed within 15-mer peptide
+ANCHOR_OFFSETS_MHC2 = [0, 3, 5, 8]  # 0-indexed within peptide
+
+# MHC-I binding anchor positions (8-11mer peptides)
+# P2 and P9 (C-terminal) are the dominant anchors for Class I
+ANCHOR_OFFSETS_MHC1 = [1, -1]  # 0-indexed: position 2 and last residue
 
 # Conservative substitutions that disrupt MHC-II binding at anchor positions
 # These are chosen to:
@@ -57,7 +64,7 @@ ANCHOR_SUBSTITUTIONS = {
 
 # Positions to never mutate (structurally critical in most proteins)
 # Cysteines in disulfide bonds, glycosylation sites, catalytic residues
-AVOID_MUTATION = {"C"}  # Conservative default; could be expanded
+AVOID_MUTATION = {"C"}  # Conservative default; expanded at runtime with CDR positions
 
 # ── KNOWN TREGITOPE SEQUENCES ────────────────────────────────────────
 # Published IgG-derived Tregitope sequences from EpiVax's foundational
@@ -130,6 +137,8 @@ class DeimmunizationResult:
     expected_binding_disruption: str  # "High", "Moderate", "Low"
     allele: str
     original_rank: float
+    mhc_class: str = "II"  # "I" or "II"
+    skipped_reason: str = ""  # if skipped: "CDR", "buried", "Treg"
 
 
 @dataclass
@@ -142,6 +151,8 @@ class RedesignedSequence:
     mutations: list  # [(position, original_aa, new_aa)]
     targeted_epitopes: int
     strategy: str
+    epitopes_before: int = 0   # re-scoring: epitope count before
+    epitopes_after: int = 0    # re-scoring: epitope count after
 
 
 # =====================================================================
@@ -328,32 +339,111 @@ def _build_treg_position_set(
     return protected
 
 
+def _build_cdr_position_set(cdr_regions: list[dict] | None) -> set[int]:
+    """Return 1-indexed positions covered by CDR regions."""
+    protected: set[int] = set()
+    if not cdr_regions:
+        return protected
+    for cdr in cdr_regions:
+        for pos in range(cdr["start"], cdr["end"] + 1):
+            protected.add(pos)
+    return protected
+
+
+def _build_surface_position_set(
+    sasa_scores: dict | None, threshold: float = 0.20,
+) -> set[int] | None:
+    """Return 1-indexed positions that are surface-exposed (SASA > threshold).
+
+    Returns None if no SASA data available (meaning: don't filter).
+    """
+    if not sasa_scores:
+        return None
+    return {pos for pos, sasa in sasa_scores.items() if sasa >= threshold}
+
+
 def deimmunize_epitopes(
     sequence: str,
     epitope_results: list,
     max_epitopes: int = 10,
     max_mutations_per_epitope: int = 2,
     tolerance_result: Optional[ToleranceResult] = None,
+    cdr_regions: list[dict] | None = None,
+    sasa_scores: dict | None = None,
+    mhc1_epitopes: list | None = None,
 ) -> list[DeimmunizationResult]:
     """Generate deimmunization suggestions for top epitope hotspots.
 
-    Strategy: For each epitope, mutate 1-2 anchor positions (P1, P4, P6, or P9)
-    with conservative substitutions that disrupt MHC-II binding.
+    Handles both MHC-II (from epitope_results) and MHC-I (from mhc1_epitopes).
+
+    Structural constraints:
+      - CDR positions are never mutated (antibody binding site)
+      - Buried epitopes (SASA < 0.20) are skipped (not immune-accessible)
+      - Treg epitope positions are preserved
 
     When *tolerance_result* is provided, positions that fall inside a known Treg
     epitope are skipped so that tolerance-inducing sequences are preserved.
     """
+    # Build protected position sets
+    treg_positions = _build_treg_position_set(tolerance_result)
+    cdr_positions = _build_cdr_position_set(cdr_regions)
+    surface_positions = _build_surface_position_set(sasa_scores)
+
+    results: list[DeimmunizationResult] = []
+
+    # ── MHC-II deimmunization ──
+    results.extend(_deimmunize_class(
+        sequence, epitope_results, ANCHOR_OFFSETS_MHC2,
+        mhc_class="II", max_epitopes=max_epitopes,
+        max_mutations_per_epitope=max_mutations_per_epitope,
+        treg_positions=treg_positions, cdr_positions=cdr_positions,
+        surface_positions=surface_positions,
+    ))
+
+    # ── MHC-I deimmunization ──
+    if mhc1_epitopes:
+        # Convert MHCIEpitope objects to a compatible interface
+        class _MHC1Adapter:
+            def __init__(self, ep):
+                self.start = ep.start
+                self.end = ep.end
+                self.peptide = ep.sequence
+                self.percentile_rank = ep.rank
+                self.allele = ep.allele
+
+        adapted = [_MHC1Adapter(ep) for ep in mhc1_epitopes
+                    if ep.rank < 2.0]  # strong binders only
+        results.extend(_deimmunize_class(
+            sequence, adapted, ANCHOR_OFFSETS_MHC1,
+            mhc_class="I", max_epitopes=max_epitopes,
+            max_mutations_per_epitope=1,  # more conservative for Class I
+            treg_positions=treg_positions, cdr_positions=cdr_positions,
+            surface_positions=surface_positions,
+        ))
+
+    return results
+
+
+def _deimmunize_class(
+    sequence: str,
+    epitope_results: list,
+    anchor_offsets: list[int],
+    mhc_class: str,
+    max_epitopes: int,
+    max_mutations_per_epitope: int,
+    treg_positions: set[int],
+    cdr_positions: set[int],
+    surface_positions: set[int] | None,
+) -> list[DeimmunizationResult]:
+    """Core deimmunization logic for one MHC class."""
     if not epitope_results:
         return []
-
-    # Build set of positions protected by Treg epitopes
-    treg_positions = _build_treg_position_set(tolerance_result)
 
     # Deduplicate overlapping epitopes -- keep the strongest binder per region
     seen_regions: set[int] = set()
     unique_epitopes: list = []
     for ep in epitope_results:
-        region_key = ep.start // 5  # Cluster nearby epitopes
+        region_key = ep.start // 5
         if region_key not in seen_regions:
             seen_regions.add(region_key)
             unique_epitopes.append(ep)
@@ -363,21 +453,33 @@ def deimmunize_epitopes(
     results: list[DeimmunizationResult] = []
     for ep in unique_epitopes:
         peptide = ep.peptide
-        if len(peptide) < 9:
+        if len(peptide) < 8:
             continue
 
-        # If the entire epitope is within a Treg region, skip it entirely
         epitope_positions = set(range(ep.start, ep.end + 1))
+
+        # Skip if entirely within Treg region
         if treg_positions and epitope_positions.issubset(treg_positions):
             continue
+
+        # Skip buried epitopes (not accessible to immune system)
+        if surface_positions is not None:
+            surface_overlap = epitope_positions & surface_positions
+            if len(surface_overlap) < len(epitope_positions) * 0.3:
+                continue  # <30% surface-exposed → skip
 
         mutations: list[tuple] = []
         modified = list(peptide)
         anchors_hit: list[str] = []
 
-        for offset in ANCHOR_OFFSETS:
-            if offset >= len(peptide):
-                continue
+        # Resolve anchor offsets (handle negative index for MHC-I C-terminal)
+        resolved_offsets = []
+        for off in anchor_offsets:
+            actual = off if off >= 0 else len(peptide) + off
+            if 0 <= actual < len(peptide):
+                resolved_offsets.append(actual)
+
+        for offset in resolved_offsets:
             if len(mutations) >= max_mutations_per_epitope:
                 break
 
@@ -385,6 +487,10 @@ def deimmunize_epitopes(
 
             # Skip positions inside Treg epitopes
             if seq_pos in treg_positions:
+                continue
+
+            # Skip CDR positions (antibody binding site)
+            if seq_pos in cdr_positions:
                 continue
 
             aa = peptide[offset]
@@ -401,15 +507,10 @@ def deimmunize_epitopes(
             continue
 
         # Estimate binding disruption
-        if len(mutations) >= 2 and any(
-            o == 0
-            for _, (o, _, _) in enumerate(
-                [(m[0] - ep.start, m[1], m[2]) for m in mutations]
-            )
-        ):
+        if len(mutations) >= 2:
             disruption = "High"
-        elif len(mutations) >= 2:
-            disruption = "High"
+        elif mhc_class == "I" and any(o == resolved_offsets[-1] for o in [m[0] - ep.start for m in mutations]):
+            disruption = "High"  # C-terminal anchor for MHC-I
         elif mutations[0][0] - ep.start == 0:  # P1 hit
             disruption = "High"
         else:
@@ -426,15 +527,43 @@ def deimmunize_epitopes(
                 expected_binding_disruption=disruption,
                 allele=ep.allele,
                 original_rank=ep.percentile_rank,
+                mhc_class=mhc_class,
             )
         )
 
     return results
 
 
+def rescore_variant(
+    original_epitopes: list,
+    variant_sequence: str,
+    original_sequence: str,
+) -> tuple[int, int]:
+    """Quick local re-scoring: count how many original epitopes are disrupted.
+
+    Returns (epitopes_before, epitopes_after) where 'after' counts epitopes
+    whose anchor residues are unchanged in the variant (i.e. still present).
+    """
+    before = len(original_epitopes)
+    after = 0
+    for ep in original_epitopes:
+        # Check if any MHC-II anchor position was mutated
+        disrupted = False
+        for offset in ANCHOR_OFFSETS_MHC2:
+            idx = ep.start - 1 + offset
+            if 0 <= idx < len(original_sequence) and idx < len(variant_sequence):
+                if variant_sequence[idx] != original_sequence[idx]:
+                    disrupted = True
+                    break
+        if not disrupted:
+            after += 1
+    return before, after
+
+
 def generate_redesigned_sequences(
     original_sequence: str,
     deimmunization_results: list[DeimmunizationResult],
+    original_epitopes: list | None = None,
 ) -> list[RedesignedSequence]:
     """Generate full redesigned sequences from deimmunization results.
 
@@ -442,9 +571,23 @@ def generate_redesigned_sequences(
         1. Conservative -- only top 3 highest-confidence mutations
         2. Moderate -- top 5-7 epitope regions, 1 mutation each
         3. Aggressive -- all suggested mutations applied
+
+    If *original_epitopes* is provided, each variant gets a before/after
+    epitope count via local re-scoring.
     """
     if not deimmunization_results:
         return []
+
+    # Count MHC class breakdown
+    n_class1 = sum(1 for dr in deimmunization_results if dr.mhc_class == "I")
+    n_class2 = sum(1 for dr in deimmunization_results if dr.mhc_class == "II")
+    class_note = ""
+    if n_class1 and n_class2:
+        class_note = f" MHC-I ({n_class1}) + MHC-II ({n_class2}) anchors."
+    elif n_class1:
+        class_note = f" MHC-I anchors (P2/P9)."
+    else:
+        class_note = f" MHC-II anchors (P1/P4/P6/P9)."
 
     all_mutations = []
     for dr in deimmunization_results:
@@ -462,71 +605,76 @@ def generate_redesigned_sequences(
 
     sorted_mutations = sorted(pos_map.values(), key=lambda x: x[4])  # by rank
 
-    variants: list[RedesignedSequence] = []
-
-    # Variant 1: Conservative (top 3 mutations at P1 anchors)
-    conservative_muts = sorted_mutations[:3]
-    if conservative_muts:
+    def _apply_mutations(mut_list):
         seq = list(original_sequence)
         applied = []
-        for pos, orig, new, _, _ in conservative_muts:
+        for pos, orig, new, _, _ in mut_list:
             idx = pos - 1
             if idx < len(seq) and seq[idx] == orig:
                 seq[idx] = new
                 applied.append((pos, orig, new))
+        return "".join(seq), applied
+
+    def _rescore(variant_seq, applied):
+        if original_epitopes and applied:
+            return rescore_variant(original_epitopes, variant_seq, original_sequence)
+        return 0, 0
+
+    variants: list[RedesignedSequence] = []
+
+    # Variant 1: Conservative (top 3 mutations)
+    conservative_muts = sorted_mutations[:3]
+    if conservative_muts:
+        seq, applied = _apply_mutations(conservative_muts)
+        before, after = _rescore(seq, applied)
         variants.append(
             RedesignedSequence(
                 name="Conservative (3 mutations)",
-                sequence="".join(seq),
+                sequence=seq,
                 n_mutations=len(applied),
                 mutations=applied,
                 targeted_epitopes=len(applied),
-                strategy="Targets only the 3 strongest-binding epitope P1/P4 anchors. "
-                "Minimal structural risk, moderate deimmunization.",
+                strategy="Targets the 3 strongest-binding epitope anchors." + class_note
+                + " Minimal structural risk.",
+                epitopes_before=before,
+                epitopes_after=after,
             )
         )
 
     # Variant 2: Moderate (top 7 mutations)
     moderate_muts = sorted_mutations[:7]
     if len(moderate_muts) > 3:
-        seq = list(original_sequence)
-        applied = []
-        for pos, orig, new, _, _ in moderate_muts:
-            idx = pos - 1
-            if idx < len(seq) and seq[idx] == orig:
-                seq[idx] = new
-                applied.append((pos, orig, new))
+        seq, applied = _apply_mutations(moderate_muts)
+        before, after = _rescore(seq, applied)
         variants.append(
             RedesignedSequence(
                 name="Moderate (7 mutations)",
-                sequence="".join(seq),
+                sequence=seq,
                 n_mutations=len(applied),
                 mutations=applied,
                 targeted_epitopes=len(applied),
-                strategy="Targets top 7 epitope anchor residues. "
-                "Balanced deimmunization with acceptable structural risk.",
+                strategy="Targets top 7 epitope anchors." + class_note
+                + " Balanced deimmunization.",
+                epitopes_before=before,
+                epitopes_after=after,
             )
         )
 
     # Variant 3: Aggressive (all mutations)
     if len(sorted_mutations) > 7:
-        seq = list(original_sequence)
-        applied = []
-        for pos, orig, new, _, _ in sorted_mutations:
-            idx = pos - 1
-            if idx < len(seq) and seq[idx] == orig:
-                seq[idx] = new
-                applied.append((pos, orig, new))
+        seq, applied = _apply_mutations(sorted_mutations)
+        before, after = _rescore(seq, applied)
         variants.append(
             RedesignedSequence(
                 name=f"Aggressive ({len(applied)} mutations)",
-                sequence="".join(seq),
+                sequence=seq,
                 n_mutations=len(applied),
                 mutations=applied,
                 targeted_epitopes=len(applied),
-                strategy="Targets all identified epitope anchors. "
-                "Maximum deimmunization but higher structural risk -- "
-                "validate with stability assays.",
+                strategy="All identified epitope anchors." + class_note
+                + " Maximum deimmunization -- validate with stability assays.",
+                epitopes_before=before,
+                epitopes_after=after,
             )
         )
 

@@ -97,6 +97,19 @@ LSKADYEKHKVYACEVTHQGLSSPVTKSFNRGEC""",
         "dose": "1.8 mg/kg",
         "schedule": "Q3W IV",
     },
+    "Bococizumab (anti-PCSK9)": {
+        "sequence": """>Heavy Chain
+QVQLVQSGAEVKKPGASVKVSCKASGYTFTSYYMHWVRQAPGQGLEWMGEISPFGGRTNYNEKFKSRVTMTRDTSTSTVYMELSSLRSEDTAVYYCARERPLYASDLWGQGTTVTVSS""",
+        "modality": "Monoclonal Antibody",
+        "species": "Humanized",
+        "route": "Subcutaneous",
+        "disease": "Cardiovascular",
+        "backbone": "human IgG2",
+        "conjugate": "Unconjugated",
+        "expression_system": "Chinese hamster ovary (CHO) cells",
+        "dose": "150 mg",
+        "schedule": "Q2W SC",
+    },
     "Moxetumomab pasudotox (scFv immunotoxin)": {
         "sequence": """>VL
 DIQMTQTTSSLSASLGDRVTISCRASQDISKYLNWYQQKPDGTVKLLIYHTSRLHSGVPS
@@ -130,14 +143,64 @@ from sequence_engine import (
     filter_surface_epitopes, detect_cdr_regions, check_cdr_epitope_overlap,
 )
 from claude_report import generate_risk_memo
-from safebind_mhc1_cytotoxic import run_cytotoxic_assessment, CytotoxicReport
+from safebind_mhc1_cytotoxic import (
+    run_cytotoxic_assessment, CytotoxicReport,
+    MHCIEpitope, CytotoxicResidueRisk,
+)
 from safebind_composite_scorer import compute_composite_score, CompositeScore
+import hashlib
+import json
+
+_MHC1_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".mhc1_cache")
+_PDB_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".pdb_cache")
+
+
+def _load_mhc1_cache(chain_name: str, chain_seq: str):
+    """Load pre-computed MHC-I results from disk cache.
+
+    Tries exact name+hash match first, then falls back to hash-only match
+    (handles FASTA header variations like 'VL' vs 'VL|original').
+    """
+    seq_hash = hashlib.sha256(chain_seq.encode()).hexdigest()[:12]
+    safe_name = chain_name.replace(" ", "_").replace("/", "_")
+    cache_path = os.path.join(_MHC1_CACHE_DIR, f"{safe_name}_{seq_hash}.json")
+    if not os.path.exists(cache_path):
+        # Fallback: search by hash suffix in any cached file
+        if os.path.isdir(_MHC1_CACHE_DIR):
+            for fname in os.listdir(_MHC1_CACHE_DIR):
+                if fname.endswith(f"_{seq_hash}.json"):
+                    cache_path = os.path.join(_MHC1_CACHE_DIR, fname)
+                    break
+            else:
+                return None
+        else:
+            return None
+    with open(cache_path) as f:
+        d = json.load(f)
+    # Reconstruct dataclass
+    epitopes = [MHCIEpitope(**ep) for ep in d.get("epitopes", [])]
+    residue_risks = [CytotoxicResidueRisk(**rr) for rr in d.get("residue_risks", [])]
+    return CytotoxicReport(
+        total_epitopes_predicted=d["total_epitopes_predicted"],
+        strong_binders=d["strong_binders"],
+        moderate_binders=d["moderate_binders"],
+        epitopes=epitopes,
+        residue_risks=residue_risks,
+        hotspot_regions=d.get("hotspot_regions", []),
+        validated_hits=d.get("validated_hits", 0),
+        validated_details=d.get("validated_details", []),
+        overall_cytotoxic_risk=d["overall_cytotoxic_risk"],
+        risk_category=d["risk_category"],
+        prediction_sources=d.get("prediction_sources", []),
+        aav_epitope_recovery=d.get("aav_epitope_recovery"),
+        data_references=d.get("data_references"),
+    )
 from deimmunize import (
     deimmunize_epitopes, generate_redesigned_sequences,
     run_tolerance_analysis,
 )
 from tamarind_integration import (
-    fold_protein, suggest_redesigns, _get_api_key,
+    fold_protein, _get_api_key,
     submit_fold_job, check_fold_status, fetch_fold_result,
 )
 from safebind_downselect import render_downselect_tab
@@ -241,6 +304,126 @@ def run_immunogenicity_assessment_adapter(
         hotspot_regions=hotspot_regions,
         risk_category=risk_category,
     )
+
+
+def _load_pdb_cache(chain_name: str, chain_seq: str) -> str | None:
+    """Load cached PDB structure from disk."""
+    seq_hash = hashlib.sha256(chain_seq.encode()).hexdigest()[:12]
+    safe_name = chain_name.replace(" ", "_").replace("/", "_")
+    cache_path = os.path.join(_PDB_CACHE_DIR, f"{safe_name}_{seq_hash}.pdb")
+    if not os.path.exists(cache_path):
+        # Fallback: search by hash suffix
+        if os.path.isdir(_PDB_CACHE_DIR):
+            for fname in os.listdir(_PDB_CACHE_DIR):
+                if fname.endswith(f"_{seq_hash}.pdb"):
+                    cache_path = os.path.join(_PDB_CACHE_DIR, fname)
+                    break
+            else:
+                return None
+        else:
+            return None
+    with open(cache_path) as f:
+        return f.read()
+
+
+def _save_pdb_cache(chain_name: str, chain_seq: str, pdb_data: str):
+    """Save PDB structure to disk cache."""
+    os.makedirs(_PDB_CACHE_DIR, exist_ok=True)
+    seq_hash = hashlib.sha256(chain_seq.encode()).hexdigest()[:12]
+    safe_name = chain_name.replace(" ", "_").replace("/", "_")
+    cache_path = os.path.join(_PDB_CACHE_DIR, f"{safe_name}_{seq_hash}.pdb")
+    with open(cache_path, "w") as f:
+        f.write(pdb_data)
+
+
+# ── 3-D Risk Heatmap helpers ────────────────────────────────────────
+def _compute_residue_risk_map(
+    seq_len: int,
+    epitopes=None,
+    bcell_epitopes=None,
+    mhc1_report=None,
+    mode="combined",
+):
+    """Return a list of floats (0-1) per residue for the chosen risk layer.
+
+    Modes: 'humoral' (MHC-II + B-cell), 'cytotoxic' (MHC-I), 'combined'.
+    """
+    humoral = [0.0] * seq_len
+    cytotoxic = [0.0] * seq_len
+
+    # MHC-II / T-cell epitope density  → humoral layer
+    if epitopes:
+        for ep in epitopes:
+            rank_score = max(0.0, 1.0 - ep.percentile_rank / 10.0)  # rank<2 → ~0.8+
+            for pos in range(ep.start - 1, min(ep.end, seq_len)):
+                humoral[pos] = max(humoral[pos], rank_score)
+
+    # B-cell epitope density → humoral layer (additive, capped at 1)
+    if bcell_epitopes:
+        for bep in bcell_epitopes:
+            for pos in range(bep.start - 1, min(bep.end, seq_len)):
+                humoral[pos] = min(1.0, humoral[pos] + bep.avg_score * 0.5)
+
+    # MHC-I per-residue risk → cytotoxic layer
+    if mhc1_report and mhc1_report.residue_risks:
+        for rr in mhc1_report.residue_risks:
+            idx = rr.position - 1
+            if 0 <= idx < seq_len:
+                cytotoxic[idx] = rr.mhc1_risk
+
+    if mode == "humoral":
+        return humoral
+    elif mode == "cytotoxic":
+        return cytotoxic
+    else:  # combined — max of both layers
+        return [max(h, c) for h, c in zip(humoral, cytotoxic)]
+
+
+def _inject_bfactor(pdb_text: str, risk_scores: list[float]) -> str:
+    """Replace B-factor column in ATOM/HETATM records with risk scores (0-99)."""
+    lines = []
+    for line in pdb_text.splitlines():
+        if line.startswith(("ATOM", "HETATM")):
+            try:
+                resseq = int(line[22:26].strip())
+                idx = resseq - 1
+                bval = risk_scores[idx] * 99.0 if 0 <= idx < len(risk_scores) else 0.0
+            except (ValueError, IndexError):
+                bval = 0.0
+            # B-factor occupies columns 60-65 (6 chars, right-justified, 2 decimal)
+            line = line[:60] + f"{bval:6.2f}" + line[66:]
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_3d_heatmap(pdb_data, risk_scores, view_key, caption=""):
+    """Render a py3Dmol viewer colored by risk scores injected as B-factors."""
+    import stmol
+    import py3Dmol
+
+    modified_pdb = _inject_bfactor(pdb_data, risk_scores)
+    view = py3Dmol.view(width="100%", height=400)
+    view.addModel(modified_pdb, "pdb")
+    view.setStyle({
+        "cartoon": {
+            "colorscheme": {
+                "prop": "b",
+                "gradient": "rwb",
+                "min": 0,
+                "max": 99,
+            }
+        }
+    })
+    # Highlight high-risk residues (>50%) with sticks
+    view.addStyle(
+        {"b": [50, 99]},
+        {"stick": {"colorscheme": {"prop": "b", "gradient": "rwb", "min": 0, "max": 99}, "radius": 0.12}},
+    )
+    view.zoomTo()
+    stmol.showmol(view, height=400, width=None)
+    if caption:
+        st.caption(caption)
+
 
 st.set_page_config(
     page_title="SafeBind Risk",
@@ -637,6 +820,12 @@ with tab2:
                     existing_job = st.session_state.get(job_key)
                     pdb_data = st.session_state.get(pdb_ss_key)
 
+                    # Try disk cache if not in session state
+                    if not pdb_data:
+                        pdb_data = _load_pdb_cache(chain_name, chain_seq)
+                        if pdb_data:
+                            st.session_state[pdb_ss_key] = pdb_data
+
                     # Also populate chain_pdb from session_state if available
                     if pdb_data:
                         chain_pdb[chain_name] = pdb_data
@@ -650,6 +839,7 @@ with tab2:
                                 pdb_result = fetch_fold_result(existing_job, tamarind_key)
                             if pdb_result:
                                 st.session_state[pdb_ss_key] = pdb_result
+                                _save_pdb_cache(chain_name, chain_seq, pdb_result)
                                 del st.session_state[job_key]
                                 if start_key in st.session_state:
                                     del st.session_state[start_key]
@@ -682,23 +872,50 @@ with tab2:
 
                     if pdb_data:
                         try:
-                            import stmol
-                            import py3Dmol
-                            view = py3Dmol.view(width="100%", height=380)
-                            view.addModel(pdb_data, "pdb")
-                            view.setStyle({"cartoon": {"color": "spectrum"}})
+                            # Gather available risk layers for this chain
+                            _mhc1_for_view = chain_mhc1.get(chain_name)
+                            if _mhc1_for_view is None:
+                                _mhc1_ss = st.session_state.get(f"mhc1_{chain_name}")
+                                if isinstance(_mhc1_ss, CytotoxicReport):
+                                    _mhc1_for_view = _mhc1_ss
 
-                            if ep_results:
-                                for ep in ep_results:
-                                    for pos in range(ep.start, ep.end + 1):
-                                        view.addStyle(
-                                            {"resi": pos},
-                                            {"cartoon": {"color": "red"}, "stick": {"color": "red", "radius": 0.15}},
-                                        )
+                            _has_humoral = bool(ep_results or chain_bcell.get(chain_name))
+                            _has_cytotoxic = bool(_mhc1_for_view and _mhc1_for_view.residue_risks)
 
-                            view.zoomTo()
-                            stmol.showmol(view, height=380, width=None)
-                            st.caption("Red = T-cell epitope hotspots")
+                            heatmap_mode = st.radio(
+                                "Color by risk",
+                                ["Combined", "Humoral (MHC-II + B-cell)", "Cytotoxic (MHC-I)", "Rainbow (no risk)"],
+                                horizontal=True,
+                                key=f"heatmap_mode_{chain_name}",
+                            )
+
+                            if heatmap_mode == "Rainbow (no risk)":
+                                import stmol, py3Dmol
+                                view = py3Dmol.view(width="100%", height=400)
+                                view.addModel(pdb_data, "pdb")
+                                view.setStyle({"cartoon": {"color": "spectrum"}})
+                                view.zoomTo()
+                                stmol.showmol(view, height=400, width=None)
+                                st.caption("Rainbow coloring (N→C terminus)")
+                            else:
+                                mode_map = {
+                                    "Combined": "combined",
+                                    "Humoral (MHC-II + B-cell)": "humoral",
+                                    "Cytotoxic (MHC-I)": "cytotoxic",
+                                }
+                                risk_scores = _compute_residue_risk_map(
+                                    seq_len=len(chain_seq),
+                                    epitopes=ep_results,
+                                    bcell_epitopes=chain_bcell.get(chain_name),
+                                    mhc1_report=_mhc1_for_view,
+                                    mode=mode_map[heatmap_mode],
+                                )
+                                hot_count = sum(1 for s in risk_scores if s > 0.5)
+                                _render_3d_heatmap(
+                                    pdb_data, risk_scores,
+                                    view_key=f"heatmap_{chain_name}_{heatmap_mode}",
+                                    caption=f"Blue = low risk → Red = high risk | {hot_count} high-risk residues (>50%)",
+                                )
 
                             st.download_button(
                                 "Download PDB",
@@ -977,39 +1194,60 @@ with tab_mhc1:
             "Unlike MHC-II/ADA (humoral), this pathway causes direct cell killing — critical for gene therapy and cell therapy."
         )
 
-        # Run MHC-I analysis per chain
+        # Load cached MHC-I results: session state first, then disk cache
         for chain_name, chain_seq in chains.items():
             mhc1_key = f"mhc1_{chain_name}"
-            if mhc1_key not in st.session_state:
-                with st.spinner(f"Running MHC-I prediction for {chain_name}..."):
-                    mhc1_report = run_cytotoxic_assessment(
-                        chain_seq, name=chain_name, use_mhcflurry=False, use_iedb=True,
-                    )
-                    st.session_state[mhc1_key] = mhc1_report
-            chain_mhc1[chain_name] = st.session_state[mhc1_key]
+            if mhc1_key in st.session_state:
+                chain_mhc1[chain_name] = st.session_state[mhc1_key]
+            else:
+                cached = _load_mhc1_cache(chain_name, chain_seq)
+                if cached:
+                    st.session_state[mhc1_key] = cached
+                    chain_mhc1[chain_name] = cached
 
-        # Summary metrics across chains
-        total_strong = sum(r.strong_binders for r in chain_mhc1.values())
-        total_moderate = sum(r.moderate_binders for r in chain_mhc1.values())
-        total_validated = sum(r.validated_hits for r in chain_mhc1.values())
-        avg_risk = sum(r.overall_cytotoxic_risk for r in chain_mhc1.values()) / max(len(chain_mhc1), 1)
+        _mhc1_cached = len(chain_mhc1) == len(chains)
 
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        risk_color = "#c0392b" if avg_risk >= 0.35 else "#e67e22" if avg_risk >= 0.18 else "#27ae60"
-        mc1.markdown(
-            f'<div style="text-align:center;padding:0.8rem;background:{risk_color}10;border-radius:8px;border:1px solid {risk_color}30">'
-            f'<div style="font-size:1.8rem;font-weight:700;color:{risk_color}">{avg_risk:.0%}</div>'
-            f'<div style="font-size:0.8rem;color:#666">MHC-I Risk</div></div>',
-            unsafe_allow_html=True,
-        )
-        mc2.metric("Strong Binders", total_strong, help="Rank < 2%")
-        mc3.metric("Moderate Binders", total_moderate, help="Rank 2-10%")
-        mc4.metric("Validated Hits", total_validated, help="Matches to known epitopes")
+        if not _mhc1_cached:
+            missing = [cn for cn in chains if cn not in chain_mhc1]
+            st.info(
+                f"MHC-I prediction queries IEDB NetMHCpan 4.1 across 12 HLA supertypes "
+                f"for {len(missing)} chain(s). This takes ~10-15 seconds per chain."
+            )
+            if st.button("Run MHC-I Cytotoxic Analysis", type="primary"):
+                for chain_name, chain_seq in chains.items():
+                    mhc1_key = f"mhc1_{chain_name}"
+                    if mhc1_key not in st.session_state:
+                        with st.spinner(f"Predicting MHC-I epitopes for {chain_name} ({len(chain_seq)} aa)..."):
+                            mhc1_report = run_cytotoxic_assessment(
+                                chain_seq, name=chain_name, use_mhcflurry=False, use_iedb=True,
+                            )
+                            st.session_state[mhc1_key] = mhc1_report
+                    chain_mhc1[chain_name] = st.session_state[mhc1_key]
+                st.rerun()
 
-        st.markdown("")
+        if chain_mhc1:
+            # Summary metrics across chains
+            total_strong = sum(r.strong_binders for r in chain_mhc1.values())
+            total_moderate = sum(r.moderate_binders for r in chain_mhc1.values())
+            total_validated = sum(r.validated_hits for r in chain_mhc1.values())
+            avg_risk = sum(r.overall_cytotoxic_risk for r in chain_mhc1.values()) / max(len(chain_mhc1), 1)
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            risk_color = "#c0392b" if avg_risk >= 0.35 else "#e67e22" if avg_risk >= 0.18 else "#27ae60"
+            mc1.markdown(
+                f'<div style="text-align:center;padding:0.8rem;background:{risk_color}10;border-radius:8px;border:1px solid {risk_color}30">'
+                f'<div style="font-size:1.8rem;font-weight:700;color:{risk_color}">{avg_risk:.0%}</div>'
+                f'<div style="font-size:0.8rem;color:#666">MHC-I Risk</div></div>',
+                unsafe_allow_html=True,
+            )
+            mc2.metric("Strong Binders", total_strong, help="Rank < 2%")
+            mc3.metric("Moderate Binders", total_moderate, help="Rank 2-10%")
+            mc4.metric("Validated Hits", total_validated, help="Matches to known epitopes")
+
+            st.markdown("")
 
         # Dual pathway comparison
-        if any(chain_epitopes.get(name) for name in chains):
+        if chain_mhc1 and any(chain_epitopes.get(name) for name in chains):
             st.markdown("**Dual Pathway Comparison**")
             pathway_rows = []
             for cname in chains:
@@ -1118,6 +1356,12 @@ with tab_composite:
             "Fuses clinical benchmarks (IDC DB V1), sequence similarity, "
             "dual-pathway epitope load (MHC-I + MHC-II), and AI synthesis."
         )
+
+        # Load any cached MHC-I results for composite scoring
+        for cname in chains:
+            mhc1_key = f"mhc1_{cname}"
+            if mhc1_key in st.session_state and cname not in chain_mhc1:
+                chain_mhc1[cname] = st.session_state[mhc1_key]
 
         # Aggregate epitope data across chains
         total_mhc2 = sum(len(chain_epitopes.get(cname, [])) for cname in chains)
@@ -1297,6 +1541,21 @@ with tab3:
 
         st.markdown("")
 
+        # --- Structural constraints summary ---
+        _has_cdrs = any(chain_cdr.get(n) for n in chains)
+        _has_sasa = any(chain_sasa.get(n) for n in chains)
+        _has_mhc1 = any(chain_mhc1.get(n) or st.session_state.get(f"mhc1_{n}") for n in chains)
+        constraint_parts = []
+        if _has_cdrs:
+            constraint_parts.append("CDR-protected")
+        if _has_sasa:
+            constraint_parts.append("SASA-filtered")
+        if _has_mhc1:
+            constraint_parts.append("MHC-I + MHC-II")
+        else:
+            constraint_parts.append("MHC-II only")
+        st.caption("Constraints: " + " | ".join(constraint_parts))
+
         # --- Rule-Based Deimmunization ---
         st.markdown("**Deimmunized Variants**")
 
@@ -1308,18 +1567,47 @@ with tab3:
                 continue
 
             tol_for_chain = chain_tolerance.get(chain_name)
-            deimm_results = deimmunize_epitopes(chain_seq, ep_results, tolerance_result=tol_for_chain)
-            variants = generate_redesigned_sequences(chain_seq, deimm_results)
+            cdrs_for_chain = chain_cdr.get(chain_name)
+            sasa_for_chain = chain_sasa.get(chain_name)
+
+            # Gather MHC-I epitopes if available
+            mhc1_for_chain = chain_mhc1.get(chain_name)
+            if mhc1_for_chain is None:
+                _ss = st.session_state.get(f"mhc1_{chain_name}")
+                if hasattr(_ss, 'epitopes'):
+                    mhc1_for_chain = _ss
+            mhc1_eps = mhc1_for_chain.epitopes if mhc1_for_chain else None
+
+            deimm_results = deimmunize_epitopes(
+                chain_seq, ep_results,
+                tolerance_result=tol_for_chain,
+                cdr_regions=cdrs_for_chain,
+                sasa_scores=sasa_for_chain,
+                mhc1_epitopes=mhc1_eps,
+            )
+            variants = generate_redesigned_sequences(
+                chain_seq, deimm_results,
+                original_epitopes=ep_results,
+            )
             all_chain_variants[chain_name] = variants
 
             if not variants:
+                st.caption(f"{chain_name}: no high-confidence mutations identified.")
                 continue
 
-            with st.expander(f"{chain_name} — {len(deimm_results)} mutations across {len(variants)} variants", expanded=(len(chains) == 1)):
+            # Count MHC class breakdown
+            n_c1 = sum(1 for dr in deimm_results if dr.mhc_class == "I")
+            n_c2 = sum(1 for dr in deimm_results if dr.mhc_class == "II")
+            class_label = f"Class II: {n_c2}"
+            if n_c1:
+                class_label += f", Class I: {n_c1}"
+
+            with st.expander(f"{chain_name} — {len(deimm_results)} targets ({class_label}), {len(variants)} variants", expanded=(len(chains) == 1)):
                 # Mutation map
                 mut_df = pd.DataFrame([
                     {
                         "Region": f"{dr.region_start}-{dr.region_end}",
+                        "MHC": dr.mhc_class,
                         "Mutations": ", ".join(f"{o}{p}{n}" for p, o, n in dr.mutations),
                         "Disruption": dr.expected_binding_disruption,
                         "Allele": dr.allele,
@@ -1328,23 +1616,38 @@ with tab3:
                 ])
                 st.dataframe(mut_df, hide_index=True, use_container_width=True)
 
-                # Variants
+                # Variants with re-scoring
                 for i, var in enumerate(variants):
-                    st.markdown(f"**{var.name}** — {var.n_mutations} mutations ({var.strategy})")
+                    # Re-score badge
+                    rescore_badge = ""
+                    if var.epitopes_before > 0:
+                        reduction = var.epitopes_before - var.epitopes_after
+                        pct = reduction / var.epitopes_before * 100
+                        rescore_badge = f" — **{reduction}/{var.epitopes_before} epitopes disrupted ({pct:.0f}%)**"
+
+                    st.markdown(f"**{var.name}** — {var.n_mutations} mutations{rescore_badge}")
+                    st.caption(var.strategy)
 
                     # Highlighted sequence
                     seq_html = '<div style="font-family:monospace; word-wrap:break-word; line-height:1.8; font-size:0.82rem">'
                     mut_positions = {pos for pos, _, _ in var.mutations}
+                    cdr_pos_set = set()
+                    if cdrs_for_chain:
+                        for cdr in cdrs_for_chain:
+                            cdr_pos_set.update(range(cdr["start"], cdr["end"] + 1))
                     for j, aa in enumerate(var.sequence):
                         pos = j + 1
                         if pos in mut_positions:
                             seq_html += f'<span style="background:#27ae60; color:white; padding:1px 3px; border-radius:2px; font-weight:bold" title="{chain_seq[j]}->{aa}">{aa}</span>'
+                        elif pos in cdr_pos_set:
+                            seq_html += f'<span style="background:#3498db22; border-bottom:2px solid #3498db" title="CDR">{aa}</span>'
                         else:
                             seq_html += aa
                         if pos % 80 == 0:
                             seq_html += f' <span style="color:#bbb; font-size:0.75em">{pos}</span><br>'
                     seq_html += "</div>"
                     st.markdown(seq_html, unsafe_allow_html=True)
+                    st.caption("Green = mutation, Blue underline = CDR (protected)")
 
                     safe_name = chain_name.replace(" ", "_")
                     fasta = f">{safe_name}|{var.name.replace(' ', '_')}|{var.n_mutations}_mutations\n"
@@ -1388,67 +1691,6 @@ with tab3:
                             mime="text/plain",
                             key=f"dl_combined_{level}",
                         )
-
-        # --- ProteinMPNN ---
-        if tamarind_key:
-            st.markdown("")
-            st.markdown("**ProteinMPNN Redesign**")
-            st.caption("Structure-aware sequence design at epitope anchor positions.")
-
-            for chain_name, chain_seq in chains.items():
-                ep_results = chain_epitopes.get(chain_name, [])
-                if not ep_results:
-                    continue
-
-                hotspot_positions = set()
-                for ep in ep_results:
-                    for offset in [0, 3, 5, 8]:
-                        pos = ep.start + offset
-                        if pos <= len(chain_seq):
-                            hotspot_positions.add(pos)
-
-                if not hotspot_positions:
-                    continue
-
-                pdb_for_chain = chain_pdb.get(chain_name)
-
-                with st.expander(f"{chain_name} — {len(hotspot_positions)} designable positions"):
-                    if st.button(f"Run ProteinMPNN", key=f"mpnn_run_{chain_name}"):
-                        mpnn_results = suggest_redesigns(
-                            chain_seq, sorted(hotspot_positions), tamarind_key,
-                            n_designs=3, pdb_data=pdb_for_chain,
-                        )
-
-                        if mpnn_results:
-                            for idx, result in enumerate(mpnn_results):
-                                mpnn_seq = result["sequence"]
-                                mpnn_score = result.get("score", 0)
-
-                                mutations = []
-                                for j, (orig, new) in enumerate(zip(chain_seq, mpnn_seq)):
-                                    if orig != new:
-                                        mutations.append((j + 1, orig, new))
-
-                                st.markdown(f"**Design {idx + 1}** — {len(mutations)} mutations (score: {mpnn_score:.3f})")
-
-                                if mutations:
-                                    st.dataframe(
-                                        pd.DataFrame([{"Pos": p, "From": o, "To": n} for p, o, n in mutations]),
-                                        hide_index=True,
-                                    )
-
-                                safe_name = chain_name.replace(" ", "_")
-                                mpnn_fasta = f">{safe_name}|MPNN_design_{idx+1}|score={mpnn_score:.3f}\n"
-                                mpnn_fasta += "\n".join(mpnn_seq[k:k+60] for k in range(0, len(mpnn_seq), 60))
-                                st.download_button(
-                                    f"Download Design {idx + 1}",
-                                    mpnn_fasta,
-                                    f"safebind_{safe_name}_mpnn_{idx+1}.fasta",
-                                    mime="text/plain",
-                                    key=f"dl_mpnn_{safe_name}_{idx}",
-                                )
-                        else:
-                            st.warning("ProteinMPNN returned no results.")
 
     elif chains:
         st.info("Waiting for epitope predictions to generate redesigned sequences.")

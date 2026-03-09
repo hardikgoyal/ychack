@@ -55,3 +55,7 @@ sequence_features.py
 ada_model.pkl
 benchmark.py
 benchmark_results.csv
+
+# Cached prediction data
+.mhc1_cache/
+.pdb_cache/

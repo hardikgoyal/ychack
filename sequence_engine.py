@@ -236,7 +236,7 @@ def get_sequence_diffs(query: str, ref_seq: str) -> list:
     return diffs
 
 
-@st.cache_data(show_spinner="Predicting T-cell epitopes via IEDB...", ttl=3600)
+@st.cache_resource(show_spinner="Predicting T-cell epitopes via IEDB...", ttl=3600)
 def predict_epitopes(sequence: str, timeout: int = 120) -> list:
     """Call IEDB MHC-II binding API for T-cell epitope prediction.
 
