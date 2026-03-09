@@ -1,57 +1,72 @@
 # SafeBind Risk 🧬
 
-Hey there. If you're building protein therapeutics, you already know that immunogenicity is the silent killer of drug development programs. You spend millions getting a candidate through discovery and preclinical, only to have it fail in Phase I/II because patients develop anti-drug antibodies (ADAs). It tanks efficacy, causes adverse events, and potentially kills the entire asset.
+**Biotherapeutics Immunogenicity Risk Assessment Dashboard**
 
-That's exactly why we built **SafeBind Risk**.
+SafeBind Risk is a Streamlit-based web application designed to predict anti-drug antibody (ADA) probability for protein therapeutic candidates. It leverages empirical clinical data, advanced sequence analysis, structural modeling, and AI to provide a comprehensive immunogenicity risk profile. 
 
-SafeBind is a Streamlit dashboard that predicts the ADA risk of your biologics *before* you commit to costly trials. We look at empirical clinical data from over 200 approved drugs and 3,300+ patient cohorts to benchmark your candidate against historical realities, not just theoretical models.
+Recent updates have expanded SafeBind beyond simple MHC-II screening to a full-scale candidate downselection tool encompassing cytotoxic risk (MHC-I) and global composite scoring.
 
-## The Business Case (Why this matters)
+## Key Features
 
-Drug development has a horrific failure rate, and immunogenicity is one of the top reasons biologics fail in clinical stages. Fast-tracking a high-risk candidate is throwing good money after bad. The math is brutal:
+- **Empirical Benchmarking**: Compare your candidate against historical ADA rates matched by route of administration, disease indication, and modality (powered by clinical data from over 200 approved drugs and 3,300+ cohorts).
+- **Sequence Similarity**: Aligns query sequences to reference sequences of approved drugs using k-mer prefiltering and global sequence alignment.
+- **T-cell (MHC-II & MHC-I) & B-cell Epitope Prediction**: 
+  - *MHC-II (Helper T-cell):* Integration with the IEDB API for CD4+ binding analysis.
+  - *MHC-I (Cytotoxic T-cell):* High-throughput NetMHCpan-4.1 integration to evaluate CD8+ T-cell responses and cross-presentation risks.
+  - *B-cell:* Linear epitope prediction via Bepipred.
+- **Structural Analysis & Solvent Accessibility (SASA)**: Real-time 3D protein structure folding via **ESMFold** (powered by Tamarind Bio API), enabling calculation of surface-exposed epitopes and a 3D Risk Heatmap viewer. Includes a local `.pdb_cache` to speed up repeated runs.
+- **Composite Scoring & Candidate Downselection**: A unified risk model that aggregates clinical baselines, MHC-II, MHC-I, and B-cell data into a single `CompositeScore`. The new **Downselect** module allows teams to load entirely un-optimized sequences and automatically filter them based on viability.
+- **CDR Detection & nADA Risk Check**: Identifies complementarity-determining regions (CDRs) and assesses overlapping epitopes to estimate neutralizing ADA risk.
+- **Tolerance Analysis & AI Redesign**: Uses a JanusMatrix-like analysis to find Tregitopes and leverages **Claude 3.5 Sonnet** to automatically generate an executive risk assessment memo and redesign strategies.
 
-- **Cost of failure:** A clinical-stage failure costs anywhere from $50M to $200M+ in sunk R&D costs.
-- **Time lost:** 2-4 years of clinical development down the drain, giving competitors a massive edge.
-- **The solution:** By screening sequences for T-cell/B-cell epitopes, analyzing surface exposure (SASA) via 3D folding, and benchmarking against real-world clinical benchmarks, SafeBind acts as a cheap, high-ROI insurance policy. We identify high-risk assets early so your team can either de-immunize them or kill them fast before they burn your runway and resources.
+## Setup and Installation
 
-## What it actually does
-
-- **Real-World Benchmarking:** Compare your candidate's risk profile against our internal database of 218 approved drugs, matched precisely by route, disease, and modality.
-- **Sequence Analysis:** We align your sequence against known drugs to see if you're building on safe foundations or treading into risky territory.
-- **Epitope Prediction (T-cell & B-cell):** Full, out-of-the-box integration with the IEDB API to predict MHC-II binders and linear B-cell epitopes.
-- **Structural Risk (ESMFold):** Natively calls the Tamarind Bio API to fold your protein in real-time. This lets us see which epitopes are actually exposed on the surface (SASA) versus safely buried inside.
-- **AI Redesign Copilot:** Analyzes neutralizing ADA (nADA) risks around CDRs, runs a JanusMatrix-style tolerance analysis to find Tregitopes, and leverages Claude 3.5 Sonnet to spit out an executive risk memo and actionable de-immunization strategies.
-
-## Getting Started
-
-1. **Clone & setup:**
+1. **Clone the repository and enter the directory:**
    ```bash
-   git clone <your-repo>
    cd SafeBind
+   ```
+
+2. **Set up a Python virtual environment (recommended):**
+   ```bash
    python3 -m venv .venv
    source .venv/bin/activate
+   ```
+
+3. **Install dependencies:**
+   ```bash
    pip install -r requirements.txt
    ```
 
-2. **API Keys (Highly Recommended):**
-   To get the good stuff (3D folding and AI memos), drop your keys in `.streamlit/secrets.toml` or export them as environment variables:
+4. **Set your API Keys (optional but highly recommended):**
+   To fully utilize 3D structure folding and the AI Risk Memo generator, provide API keys either via environment variables or in `.streamlit/secrets.toml`:
+
    ```bash
    export TAMARIND_API_KEY="your-tamarind-bio-api-key"
    export ANTHROPIC_API_KEY="your-anthropic-api-key"
    ```
 
-3. **Run it:**
-   ```bash
-   streamlit run app.py
-   ```
-   Drop in your multi-chain FASTA, pick your parameters, and hit the Analyze Risk button.
+## Usage
 
----
+Run the dashboard locally using Streamlit:
 
-## What's inside the repo?
-- `app.py`: The main Streamlit dashboard. Start here.
-- `risk_model.py`: The brain of the operation. Handles the composite ADA scoring and nADA estimates based on the clinical benchmarking data.
-- `sequence_engine.py`: Sequence alignment, IEDB calls, and CDR detection routines.
-- `tamarind_integration.py`: Handles ESMFold calls via Tamarind Bio so we can get 3D structures on the fly.
-- `deimmunize.py` & `claude_report.py`: The redesign tools and Anthropic integration for the executive memos.
-- `data_loader.py`: Whips the clinical cohort CSVs into shape.
+```bash
+streamlit run app.py
+```
+
+1. Enter your multi-chain FASTA (e.g., Heavy and Light chains) or a raw sequence in the sidebar. **Note:** You can also use the integrated Drug Presets (like Odronextamab) for a quick demo.
+2. Select the therapeutic features such as Modality, Route, and Disease.
+3. Click **Analyze Risk**.
+4. Browse the tabs to view the clinical benchmark score, explore the 3D structural risk viewer, review MHC-I (Cytotoxic) risks, and utilize the Candidate Downselection module to rank multiple variants.
+
+## File Structure
+
+- `app.py`: Main Streamlit web application.
+- `safebind_composite_scorer.py`: Unifies disparate risk signals into a single global score.
+- `safebind_mhc1_cytotoxic.py`: NetMHCpan-based evaluation mapping CD8+ cytotoxic T-cell risks.
+- `safebind_downselect.py`: UI and logic for evaluating and ranking multiple sequences at once.
+- `risk_model.py`: Historical ADA risk scoring engine and neutralizing ADA (nADA) estimators.
+- `sequence_engine.py`: Sequence alignment, CDR detection, and IEDB epitope prediction calling.
+- `deimmunize.py`: Tolerance analysis and deimmunization sequence redesigns incorporating structural constraints.
+- `tamarind_integration.py`: Connects to Tamarind Bio for ESMFold protein structure generation.
+- `claude_report.py`: Prompts Anthropic's Claude 3.5 Sonnet for detailed risk and executive memos.
+- `precompute_mhc1.py` / `precompute_structures.py`: Utilities for pre-calculating and caching data prior to analysis.
