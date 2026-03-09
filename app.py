@@ -197,7 +197,7 @@ def _load_mhc1_cache(chain_name: str, chain_seq: str):
     )
 from deimmunize import (
     deimmunize_epitopes, generate_redesigned_sequences,
-    run_tolerance_analysis,
+    run_tolerance_analysis, compute_variant_risk_comparison,
 )
 from tamarind_integration import (
     fold_protein, _get_api_key,
@@ -1658,6 +1658,99 @@ with tab3:
                         f"safebind_{safe_name}_variant_{i+1}.fasta",
                         mime="text/plain",
                         key=f"dl_{safe_name}_{i}",
+                    )
+
+                    # --- Risk Factor Comparison Card ---
+                    mhc1_eps_list = None
+                    if mhc1_for_chain and hasattr(mhc1_for_chain, 'epitopes'):
+                        mhc1_eps_list = mhc1_for_chain.epitopes
+                    rc = compute_variant_risk_comparison(
+                        original_sequence=chain_seq,
+                        variant=var,
+                        mhc2_epitopes=ep_results,
+                        mhc1_epitopes=mhc1_eps_list,
+                        tolerance_result=tol_for_chain,
+                        cdr_regions=cdrs_for_chain,
+                        sasa_scores=sasa_for_chain,
+                        composite_risk=risk_result.composite_score,
+                    )
+
+                    def _delta_str(before, after, fmt=".0f", lower_is_better=True, suffix=""):
+                        """Format a delta value with color arrow."""
+                        delta = after - before
+                        if delta == 0:
+                            return f'<span style="color:#7f8c8d">— {suffix}</span>'
+                        improving = (delta < 0) if lower_is_better else (delta > 0)
+                        color = "#27ae60" if improving else "#c0392b"
+                        arrow = "↓" if delta < 0 else "↑"
+                        return f'<span style="color:{color}; font-weight:600">{arrow}{abs(delta):{fmt}}{suffix}</span>'
+
+                    risk_delta = rc.estimated_risk_before - rc.estimated_risk_after
+                    risk_color = "#27ae60" if risk_delta > 0 else "#c0392b" if risk_delta < 0 else "#7f8c8d"
+                    verdict = "Improved" if risk_delta > 2 else "Marginal" if risk_delta > 0 else "No change"
+                    verdict_color = "#27ae60" if risk_delta > 2 else "#f39c12" if risk_delta > 0 else "#7f8c8d"
+
+                    st.markdown(
+                        f'<div style="margin:0.5rem 0 1rem; padding:0.8rem 1rem; border-radius:8px; '
+                        f'border:1px solid {verdict_color}30; background:{verdict_color}06;">'
+                        f'<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem">'
+                        f'<span style="font-weight:600; font-size:0.9rem">Risk Comparison</span>'
+                        f'<span style="font-weight:700; color:{verdict_color}; font-size:0.9rem">{verdict}'
+                        f' ({rc.estimated_risk_before:.0f}% → {rc.estimated_risk_after:.0f}%)</span>'
+                        f'</div>'
+                        f'<table style="width:100%; font-size:0.82rem; border-collapse:collapse">'
+                        f'<tr style="border-bottom:1px solid #eee">'
+                        f'<td style="padding:3px 6px; color:#888">Metric</td>'
+                        f'<td style="padding:3px 6px; text-align:right; color:#888">Original</td>'
+                        f'<td style="padding:3px 6px; text-align:right; color:#888">Variant</td>'
+                        f'<td style="padding:3px 6px; text-align:right; color:#888">Delta</td></tr>'
+                        f'<tr><td style="padding:3px 6px">MHC-II epitopes</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.mhc2_before}</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.mhc2_after}</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{_delta_str(rc.mhc2_before, rc.mhc2_after)}</td></tr>'
+                        + (
+                            f'<tr><td style="padding:3px 6px">MHC-I epitopes</td>'
+                            f'<td style="padding:3px 6px; text-align:right">{rc.mhc1_before}</td>'
+                            f'<td style="padding:3px 6px; text-align:right">{rc.mhc1_after}</td>'
+                            f'<td style="padding:3px 6px; text-align:right">{_delta_str(rc.mhc1_before, rc.mhc1_after)}</td></tr>'
+                            if rc.mhc1_before > 0 else ""
+                        )
+                        + f'<tr><td style="padding:3px 6px">Epitope density</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.density_before}/100aa</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.density_after}/100aa</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{_delta_str(rc.density_before, rc.density_after, ".1f")}</td></tr>'
+                        f'<tr><td style="padding:3px 6px">Hotspot clusters</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.hotspots_before}</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.hotspots_after}</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{_delta_str(rc.hotspots_before, rc.hotspots_after)}</td></tr>'
+                        f'<tr><td style="padding:3px 6px">Tolerance score</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.tolerance_before:.2f}</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{rc.tolerance_after:.2f}</td>'
+                        f'<td style="padding:3px 6px; text-align:right">{_delta_str(rc.tolerance_before, rc.tolerance_after, ".2f", lower_is_better=False)}</td></tr>'
+                        f'<tr style="border-top:1px solid #ddd; font-weight:600">'
+                        f'<td style="padding:4px 6px">Est. ADA risk</td>'
+                        f'<td style="padding:4px 6px; text-align:right">{rc.estimated_risk_before:.0f}%</td>'
+                        f'<td style="padding:4px 6px; text-align:right; color:{risk_color}">{rc.estimated_risk_after:.0f}%</td>'
+                        f'<td style="padding:4px 6px; text-align:right">{_delta_str(rc.estimated_risk_before, rc.estimated_risk_after, ".0f", suffix="%")}</td></tr>'
+                        f'</table>'
+                        + (
+                            f'<div style="margin-top:0.4rem; font-size:0.78rem">'
+                            + "".join(
+                                f'<span style="color:#27ae60; margin-right:0.8rem">✓ Treg epitopes preserved</span>'
+                                if rc.treg_preserved else
+                                f'<span style="color:#c0392b; margin-right:0.8rem">⚠ Treg epitopes affected</span>'
+                                for _ in [1]
+                            )
+                            + "".join(
+                                f'<span style="color:#c0392b; margin-right:0.8rem">⚠ {flag}</span>'
+                                for flag in rc.structural_flags
+                            )
+                            + (f'<span style="color:#27ae60">✓ No structural concerns</span>'
+                               if not rc.structural_flags and rc.treg_preserved else "")
+                            + f'</div>'
+                        )
+                        + f'</div>',
+                        unsafe_allow_html=True,
                     )
 
         # Combined download

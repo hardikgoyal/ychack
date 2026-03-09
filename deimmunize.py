@@ -142,6 +142,28 @@ class DeimmunizationResult:
 
 
 @dataclass
+class VariantRiskComparison:
+    """Before/after risk factor comparison for a redesigned variant."""
+
+    mhc2_before: int = 0
+    mhc2_after: int = 0
+    mhc1_before: int = 0
+    mhc1_after: int = 0
+    density_before: float = 0.0   # epitopes per 100 aa
+    density_after: float = 0.0
+    hotspots_before: int = 0
+    hotspots_after: int = 0
+    tolerance_before: float = 0.0  # 0-1
+    tolerance_after: float = 0.0
+    treg_preserved: bool = True    # were Treg epitopes left intact?
+    cdr_mutations: int = 0         # should always be 0
+    buried_mutations: int = 0      # should always be 0
+    estimated_risk_before: float = 0.0  # overall ADA risk %
+    estimated_risk_after: float = 0.0
+    structural_flags: list = field(default_factory=list)  # warning strings
+
+
+@dataclass
 class RedesignedSequence:
     """A full redesigned sequence with applied mutations."""
 
@@ -679,3 +701,195 @@ def generate_redesigned_sequences(
         )
 
     return variants
+
+
+# =====================================================================
+# VARIANT RISK COMPARISON
+# =====================================================================
+
+
+def _count_hotspots(epitopes: list, window: int = 20) -> int:
+    """Count clusters of >=2 epitopes within *window* residues."""
+    if not epitopes:
+        return 0
+    positions = sorted(set(ep.start for ep in epitopes))
+    if len(positions) < 2:
+        return 0
+    clusters = 0
+    i = 0
+    while i < len(positions):
+        j = i + 1
+        while j < len(positions) and positions[j] - positions[i] <= window:
+            j += 1
+        if j - i >= 2:
+            clusters += 1
+        i = max(j, i + 1)
+    return clusters
+
+
+def _surviving_epitopes(
+    original_epitopes: list,
+    variant_sequence: str,
+    original_sequence: str,
+    mhc_class: str = "II",
+) -> list:
+    """Return epitopes whose anchor residues are unchanged in the variant."""
+    anchors = ANCHOR_OFFSETS_MHC2 if mhc_class == "II" else ANCHOR_OFFSETS_MHC1
+    surviving = []
+    for ep in original_epitopes:
+        disrupted = False
+        pep = getattr(ep, 'peptide', None) or getattr(ep, 'sequence', '')
+        for offset in anchors:
+            if mhc_class == "I" and offset == -1:
+                idx = ep.start - 1 + len(pep) - 1
+            else:
+                idx = ep.start - 1 + offset
+            if 0 <= idx < len(original_sequence) and idx < len(variant_sequence):
+                if variant_sequence[idx] != original_sequence[idx]:
+                    disrupted = True
+                    break
+        if not disrupted:
+            surviving.append(ep)
+    return surviving
+
+
+def compute_variant_risk_comparison(
+    original_sequence: str,
+    variant: RedesignedSequence,
+    mhc2_epitopes: list,
+    mhc1_epitopes: list | None = None,
+    tolerance_result: ToleranceResult | None = None,
+    cdr_regions: list | None = None,
+    sasa_scores: dict | None = None,
+    composite_risk: float = 0.0,
+) -> VariantRiskComparison:
+    """Compute a before/after risk comparison for a redesigned variant.
+
+    Parameters
+    ----------
+    original_sequence : str
+        Original amino-acid sequence.
+    variant : RedesignedSequence
+        The redesigned variant to compare against.
+    mhc2_epitopes : list
+        MHC-II epitope results (from predict_epitopes).
+    mhc1_epitopes : list, optional
+        MHC-I epitope results (from cytotoxic assessment).
+    tolerance_result : ToleranceResult, optional
+        Tolerance analysis for the original sequence.
+    cdr_regions : list, optional
+        CDR region dicts with 'start'/'end' keys.
+    sasa_scores : dict, optional
+        Per-residue SASA scores {position: score}.
+    composite_risk : float
+        Original composite ADA risk (0-100 scale).
+
+    Returns
+    -------
+    VariantRiskComparison
+    """
+    seq_len = len(original_sequence)
+    var_seq = variant.sequence
+
+    # --- MHC-II ---
+    mhc2_before = len(mhc2_epitopes)
+    mhc2_surviving = _surviving_epitopes(mhc2_epitopes, var_seq, original_sequence, "II")
+    mhc2_after = len(mhc2_surviving)
+
+    # --- MHC-I ---
+    mhc1_before = 0
+    mhc1_after = 0
+    mhc1_surviving = []
+    if mhc1_epitopes:
+        mhc1_before = len(mhc1_epitopes)
+        mhc1_surviving = _surviving_epitopes(mhc1_epitopes, var_seq, original_sequence, "I")
+        mhc1_after = len(mhc1_surviving)
+
+    # --- Epitope density (per 100 aa) ---
+    total_before = mhc2_before + mhc1_before
+    total_after = mhc2_after + mhc1_after
+    density_before = total_before / max(seq_len, 1) * 100
+    density_after = total_after / max(seq_len, 1) * 100
+
+    # --- Hotspot clusters ---
+    all_before = list(mhc2_epitopes) + (list(mhc1_epitopes) if mhc1_epitopes else [])
+    all_after = mhc2_surviving + mhc1_surviving
+    hotspots_before = _count_hotspots(all_before)
+    hotspots_after = _count_hotspots(all_after)
+
+    # --- Tolerance (re-run on surviving epitopes) ---
+    tol_before = tolerance_result.tolerance_score if tolerance_result else 0.0
+    tol_after = tol_before
+    treg_preserved = True
+    if tolerance_result and mhc2_surviving:
+        var_tol = run_tolerance_analysis(var_seq, mhc2_surviving, composite_risk / 100.0)
+        tol_after = var_tol.tolerance_score
+        # Check Treg epitopes preserved
+        orig_treg_peps = {
+            d["peptide"] for d in tolerance_result.epitope_details if d.get("is_treg")
+        }
+        var_treg_peps = {
+            d["peptide"] for d in var_tol.epitope_details if d.get("is_treg")
+        }
+        treg_preserved = orig_treg_peps.issubset(var_treg_peps) or not orig_treg_peps
+
+    # --- CDR mutations (should be 0) ---
+    cdr_mutations = 0
+    if cdr_regions:
+        cdr_pos = set()
+        for cdr in cdr_regions:
+            cdr_pos.update(range(cdr["start"], cdr["end"] + 1))
+        cdr_mutations = sum(1 for pos, _, _ in variant.mutations if pos in cdr_pos)
+
+    # --- Buried mutations (should be 0) ---
+    buried_mutations = 0
+    if sasa_scores:
+        for pos, _, _ in variant.mutations:
+            sasa_val = sasa_scores.get(pos, sasa_scores.get(str(pos), 100))
+            if sasa_val < 20:  # <20% SASA = buried
+                buried_mutations += 1
+
+    # --- Structural flags ---
+    structural_flags = []
+    if cdr_mutations > 0:
+        structural_flags.append(f"{cdr_mutations} mutation(s) in CDR regions")
+    if buried_mutations > 0:
+        structural_flags.append(f"{buried_mutations} mutation(s) in buried residues")
+    # Disulfide: check if any Cys was mutated
+    cys_mutations = sum(1 for _, orig, _ in variant.mutations if orig == "C")
+    if cys_mutations > 0:
+        structural_flags.append(f"{cys_mutations} Cys mutation(s) — check disulfide bonds")
+    # Proline introduction
+    pro_introduced = sum(1 for _, _, new in variant.mutations if new == "P")
+    if pro_introduced > 0:
+        structural_flags.append(f"{pro_introduced} Pro introduced — may alter backbone")
+
+    # --- Estimated risk ---
+    risk_before = composite_risk
+    # Adjust proportionally to epitope reduction (epitope load contribution)
+    if total_before > 0:
+        reduction_frac = (total_before - total_after) / total_before
+        # Epitope load influences ~25% of total risk (feature/sequence signals)
+        risk_delta = composite_risk * reduction_frac * 0.25
+        risk_after = max(0.0, composite_risk - risk_delta)
+    else:
+        risk_after = composite_risk
+
+    return VariantRiskComparison(
+        mhc2_before=mhc2_before,
+        mhc2_after=mhc2_after,
+        mhc1_before=mhc1_before,
+        mhc1_after=mhc1_after,
+        density_before=round(density_before, 1),
+        density_after=round(density_after, 1),
+        hotspots_before=hotspots_before,
+        hotspots_after=hotspots_after,
+        tolerance_before=round(tol_before, 3),
+        tolerance_after=round(tol_after, 3),
+        treg_preserved=treg_preserved,
+        cdr_mutations=cdr_mutations,
+        buried_mutations=buried_mutations,
+        estimated_risk_before=round(risk_before, 1),
+        estimated_risk_after=round(risk_after, 1),
+        structural_flags=structural_flags,
+    )
