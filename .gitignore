@@ -59,3 +59,9 @@ benchmark_results.csv
 # Cached prediction data
 .mhc1_cache/
 .pdb_cache/
+
+# API keys — never commit
+api_keys.py
+
+# Streamlit secrets
+.streamlit/secrets.toml
